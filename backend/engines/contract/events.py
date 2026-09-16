@@ -28,12 +28,12 @@ class BaseEventEnvelope(BaseModel):
     """WebSocket 统一消息外层信封"""
     model_config = ConfigDict(frozen=True)
     
-    event_id: str = Field(default_factory=lambda: uuid.uuid4().hex, description="事件唯一ID (幂等防重)")
-    event: EventTypeEnum = Field(..., description="事件类型枚举")
-    task_id: str = Field(..., description="所属分析任务ID")
-    document_id: int = Field(..., description="业务单据ID")
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat(), description="事件产生时间戳")
-    data: Dict[str, Any] = Field(default_factory=dict, description="业务负载明细数据")
+    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    event: EventTypeEnum = Field(..., description="事件类型")
+    task_id: str = Field(..., description="所属分析任务 task_id")
+    document_id: int = Field(..., description="单据 ID")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    data: Dict[str, Any] = Field(default_factory=dict, description="事件具体业务载荷")
 
 # --- 具体的事件业务载荷 DTO (Data Payloads) ---
 
