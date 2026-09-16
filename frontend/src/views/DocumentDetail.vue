@@ -36,6 +36,8 @@
         <el-button
           v-if="document.status === 'DRAFT' || document.status === 'REJECTED'"
           type="primary"
+          :loading="submitting"
+          :disabled="submitting"
           @click="handleSubmit"
         >
           {{ document.status === 'REJECTED' ? '重新提交审查 (升级V' + (document.current_version + 1) + ')' : '提交智能风控审查' }}
@@ -190,6 +192,7 @@ const router = useRouter()
 
 const document = ref({})
 const loading = ref(false)
+const submitting = ref(false)
 const drawerVisible = ref(false)
 const activeTaskId = ref('')
 const selectedInvoiceIndex = ref(0)
@@ -245,13 +248,19 @@ const fetchDetail = async () => {
 }
 
 const handleSubmit = async () => {
+  if (submitting.value) return
+  submitting.value = true
   try {
     const res = await api.post(`/documents/${document.value.id}/submit`)
     ElMessage.success('提交成功，多智能体风控流水线已启动！')
     activeTaskId.value = res.task_id
+    console.log(`[DocumentDetail] 提交审查: document_id=${document.value.id}, audit_version=${res.audit_version}, task_id=${res.task_id}, reused=${res.reused}`)
     drawerVisible.value = true
   } catch (err) {
-    // 错误处理
+    console.error('[DocumentDetail] 提交审查失败:', err)
+    ElMessage.error(err.response?.data?.detail || err.message || '提交审查失败')
+  } finally {
+    submitting.value = false
   }
 }
 

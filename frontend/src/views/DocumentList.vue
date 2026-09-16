@@ -124,6 +124,8 @@
               v-if="row.status === 'DRAFT' || row.status === 'REJECTED'"
               size="small"
               type="primary"
+              :loading="submittingId === row.id"
+              :disabled="submittingId !== null"
               @click="handleSubmit(row)"
             >
               {{ row.status === 'REJECTED' ? '重新提交' : '提交审查' }}
@@ -176,6 +178,7 @@ const loading = ref(false)
 const drawerVisible = ref(false)
 const activeTaskId = ref('')
 const activeDocId = ref(null)
+const submittingId = ref(null)
 
 const fetchDocuments = async () => {
   loading.value = true
@@ -197,15 +200,21 @@ const fetchDocuments = async () => {
 }
 
 const handleSubmit = async (row) => {
+  if (submittingId.value !== null) return
+  submittingId.value = row.id
   try {
     const res = await api.post(`/documents/${row.id}/submit`)
     ElMessage.success('提交成功，多智能体风控流水线已启动！')
     activeTaskId.value = res.task_id
     activeDocId.value = row.id
+    console.log(`[DocumentList] 提交审查: document_id=${row.id}, audit_version=${res.audit_version}, task_id=${res.task_id}, reused=${res.reused}`)
     drawerVisible.value = true
     fetchDocuments()
   } catch (err) {
-    // 拦截提示
+    console.error('[DocumentList] 提交审查失败:', err)
+    ElMessage.error(err.response?.data?.detail || err.message || '提交审查失败')
+  } finally {
+    submittingId.value = null
   }
 }
 

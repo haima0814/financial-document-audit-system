@@ -420,7 +420,7 @@ const agentExecutions = computed(() => {
       role: getAgentRoleName(agentName),
       status: exec.status || 'PLANNED',
       duration: exec.elapsed_ms != null ? `${exec.elapsed_ms} ms` : (exec.duration_ms != null ? `${exec.duration_ms} ms` : '-'),
-      source: exec.source || 'DETERMINISTIC',
+      source: exec.source || 'UNKNOWN',
       reason: exec.reason || exec.detail || '按既定能力集核验通过'
     })
   }
@@ -491,7 +491,13 @@ const fetchReport = async () => {
   localStorage.setItem('last_viewed_audit_id', String(documentId.value))
 
   try {
-    const res = await api.get(`/audits/reports/${documentId.value}`)
+    const taskId = route.query.task_id
+    let res = null
+    if (taskId) {
+      res = await api.get(`/audits/reports/by-task/${taskId}`)
+    } else {
+      res = await api.get(`/audits/reports/${documentId.value}`)
+    }
     if (!res || !res.id) {
       loadFailed.value = true
       report.value = null
@@ -601,8 +607,8 @@ const formatStatus = (status) => {
 }
 
 watch(
-  () => route.params.documentId,
-  (newId) => {
+  [() => route.params.documentId, () => route.query.task_id],
+  ([newId]) => {
     if (newId) {
       fetchReport()
     }

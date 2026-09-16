@@ -4,12 +4,15 @@ backend/app/services/document_service.py
 """
 import os
 import uuid
+import asyncio
+from collections import defaultdict
 from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, func, desc
 from sqlalchemy.orm import selectinload, joinedload
+from sqlalchemy.exc import IntegrityError
 
 from app.models.user import User
 from app.models.document import (
@@ -35,6 +38,9 @@ from app.repositories import document_repo
 from engines.orchestrator.master_graph import MasterOrchestrator
 from engines.orchestrator.dispatcher.local_dispatcher import LocalTaskManagerDispatcher
 from app.services.approval_engine import ApprovalEngine
+
+# 进程内单据级异步并发锁，保障多协程操作同一单据时的原子性
+_doc_submission_locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 class DocumentNotFoundError(ValueError):
     """单据不存在 (HTTP 404)"""
@@ -69,8 +75,15 @@ class DocumentService:
         req: FinancialDocumentCreateReq
     ) -> FinancialDocument:
         """
-        创建财务单据草稿 (含前置算术硬校验)
+        创建财务单据草稿 (含前置算术硬校验与 idempotency_key 幂等防重)
         """
+        # 0. 幂等预检：若携带幂等键且已存在单据，直接返回现有单据
+        if req.idempotency_key:
+            stmt = select(FinancialDocument).where(FinancialDocument.idempotency_key == req.idempotency_key)
+            existing_doc = (await self.db.execute(stmt)).scalars().first()
+            if existing_doc:
+                return existing_doc
+
         # 1. 前置硬拦截算术平账校验：明细项金额之和必须等于总金额 (公差 <= 0.01)
         if req.line_items:
             line_sum = sum(Decimal(str(item.amount)) for item in req.line_items)
@@ -85,6 +98,7 @@ class DocumentService:
         # 2. 构建主表对象
         doc = FinancialDocument(
             document_no=doc_no,
+            idempotency_key=req.idempotency_key,
             document_type=req.document_type,
             title=req.title,
             applicant_id=applicant_id,
@@ -98,7 +112,17 @@ class DocumentService:
             extra_attributes=req.extra_attributes or {},
         )
         self.db.add(doc)
-        await self.db.flush()
+        try:
+            await self.db.flush()
+        except IntegrityError:
+            # 数据库 UNIQUE(idempotency_key) 冲突兜底 (高并发重复插入)
+            await self.db.rollback()
+            if req.idempotency_key:
+                stmt = select(FinancialDocument).where(FinancialDocument.idempotency_key == req.idempotency_key)
+                existing_doc = (await self.db.execute(stmt)).scalars().first()
+                if existing_doc:
+                    return existing_doc
+            raise
 
         # 3. 添加明细项
         for item_req in req.line_items:
@@ -324,85 +348,141 @@ class DocumentService:
 
     async def submit_document(self, document_id: int, user_id: int) -> Dict[str, Any]:
         """
-        经办人提交单据：
-        1. 状态由 DRAFT/REJECTED 变为 SUBMITTED；
-        2. 生成 AnalysisTask 并启动 MasterOrchestrator 异步审查；
-        3. 审查完成后自动推进状态并启动审批工作流。
+        经办人提交单据 (保证严格提交幂等与并发安全)：
+        1. 进程内锁 + with_for_update 行级锁；
+        2. 检查当前单据在当前 audit_version 下是否已存在审核任务；
+        3. 若已有任务，直接返回已有 task_id (reused=True)，禁止重复创建；
+        4. 若无活动任务且处于 DRAFT / REJECTED / NEED_SUPPLEMENT：推进版本与状态，创建新任务 (reused=False)；
+        5. 返回 document_id + audit_version + task_id。
         """
-        doc = await self.db.get(FinancialDocument, document_id)
-        if not doc:
-            raise DocumentNotFoundError(f"单据[ID:{document_id}]不存在！")
-        if doc.applicant_id != user_id:
-            raise PermissionError("只有单据经办人本人才能提交审批！")
-        if doc.status not in ["DRAFT", "REJECTED", "NEED_SUPPLEMENT"]:
-            raise DocumentStateConflictError(f"单据当前状态为 [{doc.status}]，不可重复提交！")
+        async with _doc_submission_locks[document_id]:
+            stmt = select(FinancialDocument).where(FinancialDocument.id == document_id).with_for_update()
+            doc = (await self.db.execute(stmt)).scalars().first()
+            if not doc:
+                raise DocumentNotFoundError(f"单据[ID:{document_id}]不存在！")
+            if doc.applicant_id != user_id:
+                raise PermissionError("只有单据经办人本人才能提交审批！")
 
-        from_status = doc.status
-        doc.status = "SUBMITTED"
-        doc.submission_time = datetime.now(timezone.utc)
+            # 计算本次提交的目标版本号 (若为驳回或待补充状态重提，目标版本递增)
+            if doc.status in ["REJECTED", "NEED_SUPPLEMENT"]:
+                target_version = doc.current_version + 1
+            else:
+                target_version = doc.current_version
 
-        # 若是驳回或待补充材料后重新提交，自动递增版本号并保存 V2+ 快照
-        if from_status in ["REJECTED", "NEED_SUPPLEMENT"]:
-            doc.current_version += 1
-            doc.version_lock += 1
-
-            # 抓取当前最新明细生成全量不可变快照
-            line_stmt = select(DocumentLineItem).where(DocumentLineItem.document_id == doc.id)
-            curr_lines = list((await self.db.execute(line_stmt)).scalars().all())
-            snapshot_payload = {
-                "document_no": doc.document_no,
-                "title": doc.title,
-                "total_amount": float(doc.total_amount),
-                "line_items": [
-                    {"line_no": i.line_no, "expense_type": i.expense_type, "amount": float(i.amount)}
-                    for i in curr_lines
-                ],
-            }
-            summary_prefix = "补充材料后重新提交审批" if from_status == "NEED_SUPPLEMENT" else "驳回后修改重新提交审批"
-            new_version = DocumentVersion(
-                document_id=doc.id,
-                version_no=doc.current_version,
-                trigger_action="RESUBMIT",
-                snapshot_payload=snapshot_payload,
-                change_summary=f"{summary_prefix}(第{doc.current_version}版)",
-                created_by=user_id,
+            # 1. 检查目标版本是否已存在审核任务 (无论 PENDING/RUNNING/COMPLETED)
+            task_stmt = (
+                select(AnalysisTask)
+                .where(
+                    AnalysisTask.document_id == doc.id,
+                    AnalysisTask.audit_version == target_version
+                )
+                .order_by(desc(AnalysisTask.id))
             )
-            self.db.add(new_version)
+            existing_task = (await self.db.execute(task_stmt)).scalars().first()
+            if existing_task:
+                return {
+                    "document_id": doc.id,
+                    "audit_version": target_version,
+                    "document_no": doc.document_no,
+                    "status": doc.status,
+                    "task_id": existing_task.task_id,
+                    "reused": True,
+                    "message": "单据当前版本已有审核任务正在执行或已执行完毕，已复用现有任务。"
+                }
 
-        # 记录状态流转日志
-        if from_status in ["REJECTED", "NEED_SUPPLEMENT"]:
-            comment_str = f"经办人重新提交审批(升级为V{doc.current_version})"
-        else:
-            comment_str = "经办人提交单据审批"
+            if doc.status not in ["DRAFT", "REJECTED", "NEED_SUPPLEMENT"]:
+                # 若已处于 SUBMITTED / IN_REVIEW / PENDING_APPROVAL，检查当前生效版本任务
+                curr_task_stmt = (
+                    select(AnalysisTask)
+                    .where(
+                        AnalysisTask.document_id == doc.id,
+                        AnalysisTask.audit_version == doc.current_version
+                    )
+                    .order_by(desc(AnalysisTask.id))
+                )
+                curr_task = (await self.db.execute(curr_task_stmt)).scalars().first()
+                if curr_task:
+                    return {
+                        "document_id": doc.id,
+                        "audit_version": doc.current_version,
+                        "document_no": doc.document_no,
+                        "status": doc.status,
+                        "task_id": curr_task.task_id,
+                        "reused": True,
+                        "message": "单据当前版本已有审核任务正在执行或已执行完毕，已复用现有任务。"
+                    }
+                raise DocumentStateConflictError(f"单据当前状态为 [{doc.status}]，不可重复提交！")
 
-        status_log = DocumentStatusLog(
-            document_id=doc.id,
-            from_status=from_status,
-            to_status="SUBMITTED",
-            operator_id=user_id,
-            comment=comment_str,
-        )
-        self.db.add(status_log)
+            from_status = doc.status
 
-        # 委托 AuditService 统一启动审核 (生命周期高内聚闭环)
-        from app.services.audit_service import AuditService
-        audit_service = AuditService(self.db)
-        task_id = await audit_service.start_audit(
-            document_id=doc.id,
-            applicant_id=user_id,
-            tenant_id=getattr(doc, "tenant_id", 1),
-            audit_version=doc.current_version
-        )
+            # 若是驳回或待补充材料后重新提交，自动递增版本号并保存 V2+ 快照
+            if from_status in ["REJECTED", "NEED_SUPPLEMENT"]:
+                doc.current_version = target_version
+                doc.version_lock += 1
 
-        await self.db.commit()
+                # 抓取当前最新明细生成全量不可变快照
+                line_stmt = select(DocumentLineItem).where(DocumentLineItem.document_id == doc.id)
+                curr_lines = list((await self.db.execute(line_stmt)).scalars().all())
+                snapshot_payload = {
+                    "document_no": doc.document_no,
+                    "title": doc.title,
+                    "total_amount": float(doc.total_amount),
+                    "line_items": [
+                        {"line_no": i.line_no, "expense_type": i.expense_type, "amount": float(i.amount)}
+                        for i in curr_lines
+                    ],
+                }
+                summary_prefix = "补充材料后重新提交审批" if from_status == "NEED_SUPPLEMENT" else "驳回后修改重新提交审批"
+                new_version = DocumentVersion(
+                    document_id=doc.id,
+                    version_no=doc.current_version,
+                    trigger_action="RESUBMIT",
+                    snapshot_payload=snapshot_payload,
+                    change_summary=f"{summary_prefix}(第{doc.current_version}版)",
+                    created_by=user_id,
+                )
+                self.db.add(new_version)
 
-        return {
-            "document_id": doc.id,
-            "document_no": doc.document_no,
-            "status": doc.status,
-            "task_id": task_id,
-            "message": "单据已成功提交，AI 多智能体审查流水线已启动！"
-        }
+            doc.status = "SUBMITTED"
+            doc.submission_time = datetime.now(timezone.utc)
+
+            # 记录状态流转日志
+            if from_status in ["REJECTED", "NEED_SUPPLEMENT"]:
+                comment_str = f"经办人重新提交审批(升级为V{doc.current_version})"
+            else:
+                comment_str = "经办人提交单据审批"
+
+            status_log = DocumentStatusLog(
+                document_id=doc.id,
+                from_status=from_status,
+                to_status="SUBMITTED",
+                operator_id=user_id,
+                comment=comment_str,
+            )
+            self.db.add(status_log)
+            await self.db.flush()
+
+            # 委托 AuditService 统一启动审核 (生命周期高内聚闭环，自带 UNIQUE 与 IntegrityError 兜底)
+            from app.services.audit_service import AuditService
+            audit_service = AuditService(self.db)
+            task_id = await audit_service.start_audit(
+                document_id=doc.id,
+                applicant_id=user_id,
+                tenant_id=getattr(doc, "tenant_id", 1),
+                audit_version=doc.current_version
+            )
+
+            await self.db.commit()
+
+            return {
+                "document_id": doc.id,
+                "audit_version": doc.current_version,
+                "document_no": doc.document_no,
+                "status": doc.status,
+                "task_id": task_id,
+                "reused": False,
+                "message": "单据已成功提交，AI 多智能体审查流水线已启动！"
+            }
 
     async def cancel_document(
         self,

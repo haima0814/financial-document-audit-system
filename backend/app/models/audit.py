@@ -16,6 +16,7 @@ class AnalysisTask(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     task_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True) # UUID
     document_id: Mapped[int] = mapped_column(Integer, ForeignKey("financial_documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    audit_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)
     
     # 状态: PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
     status: Mapped[str] = mapped_column(String(32), default="PENDING", index=True)
@@ -25,6 +26,10 @@ class AnalysisTask(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("document_id", "audit_version", name="uq_task_document_audit_version"),
+    )
 
 class ReviewReport(Base):
     """综合风控体检报告主表"""

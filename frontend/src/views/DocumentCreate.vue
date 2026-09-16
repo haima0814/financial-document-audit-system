@@ -30,7 +30,7 @@
         </div>
       </template>
 
-      <el-form :model="form" label-width="120px" class="create-form">
+      <el-form :model="form" label-width="120px" class="create-form" @submit.prevent>
         <el-row :gutter="20">
           <el-col :span="8">
             <el-form-item label="单据类型" required>
@@ -224,8 +224,8 @@
         </div>
 
         <div class="submit-actions">
-          <el-button @click="$router.push('/documents')">取消</el-button>
-          <el-button type="primary" :loading="submitting" @click="handleCreateAndSubmit">
+          <el-button :disabled="submitting" @click="$router.push('/documents')">取消</el-button>
+          <el-button type="primary" :loading="submitting" :disabled="submitting" @click="handleCreateAndSubmit">
             保存并立即提交审查
           </el-button>
         </div>
@@ -265,6 +265,7 @@ const form = reactive({
 })
 
 const submitting = ref(false)
+const idempotencyKey = ref('')
 const drawerVisible = ref(false)
 const activeTaskId = ref('')
 const activeDocId = ref(null)
@@ -512,26 +513,43 @@ const handleCreateAndSubmit = async () => {
     return
   }
 
+  if (submitting.value) return
   submitting.value = true
   try {
-    // 1. 创建单据草稿
-    const created = await api.post('/documents', form)
+    // 1. 创建单据草稿 (附带幂等防重键)
+    if (!idempotencyKey.value) {
+      idempotencyKey.value = `create_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+    }
+    const payload = {
+      ...form,
+      idempotency_key: idempotencyKey.value
+    }
+    const created = await api.post('/documents', payload)
     ElMessage.success('单据保存成功，正在启动多智能体审查...')
 
     // 2. 提交审查
     const subRes = await api.post(`/documents/${created.id}/submit`)
     activeDocId.value = created.id
     activeTaskId.value = subRes.task_id
+    console.log(`[DocumentCreate] 提交成功: document_id=${created.id}, audit_version=${subRes.audit_version}, task_id=${subRes.task_id}, reused=${subRes.reused}`)
     drawerVisible.value = true
   } catch (err) {
-    // 错误处理
+    console.error('[DocumentCreate] 提交失败:', err)
+    ElMessage.error(err.response?.data?.detail || err.message || '提交审查失败')
   } finally {
     submitting.value = false
   }
 }
 
 const handleCompleted = () => {
-  router.push(`/audits/${activeDocId.value}`)
+  if (activeTaskId.value) {
+    router.push({
+      path: `/audits/${activeDocId.value}`,
+      query: { task_id: activeTaskId.value }
+    })
+  } else {
+    router.push(`/audits/${activeDocId.value}`)
+  }
 }
 </script>
 

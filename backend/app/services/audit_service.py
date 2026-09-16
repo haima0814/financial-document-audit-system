@@ -32,27 +32,60 @@ class AuditService:
     ) -> str:
         """
         审核启动统一入口 (业务生命周期高内聚闭环):
-        1. 由 AuditContextBuilder 统一从数据库装配不可变的 AuditExecutionContext 内存快照;
-        2. 物理阻断 Agent 运行时直连 DB 的后门 (Agent 全程 0 SQL / 0 ORM);
-        3. 记录 AnalysisTask 状态;
-        4. 异步派发至 TaskDispatcher (Local / Celery);
-        5. 返回审查唯一 task_id。
+        1. 幂等预检：检索当前 (document_id, audit_version) 是否已存在任务；
+        2. 写入带有 audit_version 的 AnalysisTask，捕获 IntegrityError 并发冲突兜底；
+        3. 由 AuditContextBuilder 统一从数据库装配不可变的 AuditExecutionContext 内存快照;
+        4. 物理阻断 Agent 运行时直连 DB 的后门 (Agent 全程 0 SQL / 0 ORM);
+        5. 异步派发至 TaskDispatcher (Local / Celery);
+        6. 返回审查唯一 task_id。
         """
         import uuid
+        from sqlalchemy.exc import IntegrityError
         from app.services.audit_context_builder import AuditContextBuilder
         from app.models.audit import AnalysisTask
         from engines.orchestrator.master_graph import MasterOrchestrator
         from engines.orchestrator.dispatcher import LocalTaskManagerDispatcher
 
+        # 1. 预检已有同版本任务
+        stmt = (
+            select(AnalysisTask)
+            .where(
+                AnalysisTask.document_id == document_id,
+                AnalysisTask.audit_version == audit_version
+            )
+            .order_by(desc(AnalysisTask.id))
+        )
+        existing = (await self.db.execute(stmt)).scalars().first()
+        if existing:
+            return existing.task_id
+
         task_id = f"task_{uuid.uuid4().hex[:12]}"
         analysis_task = AnalysisTask(
             task_id=task_id,
             document_id=document_id,
+            audit_version=audit_version,
             status="PENDING",
             current_stage="STAGE_1_PARSED",
             progress_pct=10,
         )
         self.db.add(analysis_task)
+        try:
+            await self.db.flush()
+        except IntegrityError:
+            # 数据库 UNIQUE(document_id, audit_version) 冲突兜底 (并发两请求同时达到)
+            await self.db.rollback()
+            retry_stmt = (
+                select(AnalysisTask)
+                .where(
+                    AnalysisTask.document_id == document_id,
+                    AnalysisTask.audit_version == audit_version
+                )
+                .order_by(desc(AnalysisTask.id))
+            )
+            existing_retry = (await self.db.execute(retry_stmt)).scalars().first()
+            if existing_retry:
+                return existing_retry.task_id
+            raise
 
         context = await AuditContextBuilder.build(
             db=self.db,
@@ -159,6 +192,8 @@ class AuditService:
             event_type=EventTypeEnum.TASK_COMPLETED,
             payload={
                 "report_id": report.id,
+                "task_id": task_id,
+                "percent": 100,
                 "overall_risk_level": result.overall_risk_level,
                 "risk_score": result.risk_score,
                 "final_score": result.final_score,

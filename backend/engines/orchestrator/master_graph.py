@@ -504,7 +504,9 @@ class MasterOrchestrator:
                         findings=all_findings,
                         reason=reason,
                         duration_ms=duration_ms,
-                        capabilities_run=capabilities
+                        capabilities_run=capabilities,
+                        source="HEURISTIC_RULE" if degraded_details else "LLM_INFERENCE",
+                        is_degraded=bool(degraded_details or status == AgentExecutionStatus.DEGRADED)
                     )
 
                 coros.append(_execute_multi_suppliers_guarded(
@@ -531,6 +533,7 @@ class MasterOrchestrator:
 
         # 广播各专业智能体节点的独立执行结果与耗时 (供 SSE 时间轴精确渲染)
         for r in all_results:
+            source_val = r.source.value if hasattr(r.source, "value") else (str(r.source) if r.source else "UNKNOWN")
             await StreamProducer.publish_event(
                 task_id=state.task_id,
                 document_id=state.document_id,
@@ -543,7 +546,8 @@ class MasterOrchestrator:
                     "elapsed_ms": r.duration_ms,
                     "findings_count": len(r.findings),
                     "reason": r.reason,
-                    "capabilities_run": [c.value if hasattr(c, "value") else str(c) for c in (r.capabilities_run or [])]
+                    "capabilities_run": [c.value if hasattr(c, "value") else str(c) for c in (r.capabilities_run or [])],
+                    "source": source_val
                 }
             )
 

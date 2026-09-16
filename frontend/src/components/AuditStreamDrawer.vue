@@ -4,6 +4,8 @@
     title="⚡ 多智能体审查流水线实时轨迹 (SSE)"
     size="520px"
     :before-close="handleClose"
+    :close-on-click-modal="false"
+    :close-on-press-escape="isCompleted || isFailed"
     direction="rtl"
   >
     <div class="stream-container">
@@ -73,6 +75,7 @@
 <script setup>
 import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 
 const props = defineProps({
@@ -122,9 +125,27 @@ const cleanup = () => {
   }
 }
 
-const handleClose = () => {
+const handleClose = async (done) => {
+  if (!isCompleted.value && !isFailed.value) {
+    try {
+      await ElMessageBox.confirm(
+        '多智能体审核流水线正在后台执行中，收起抽屉不会终止后台审查任务。是否暂时收起？',
+        '后台运行提示',
+        {
+          confirmButtonText: '暂时收起',
+          cancelButtonText: '留在当前页',
+          type: 'info'
+        }
+      )
+    } catch {
+      return
+    }
+  }
   cleanup()
   emit('update:modelValue', false)
+  if (typeof done === 'function') {
+    done()
+  }
 }
 
 onUnmounted(() => {
@@ -238,28 +259,54 @@ const handleEventMessage = (eventName, dataStr) => {
       const isSuccess = status === 'SUCCESS'
       const isDegraded = status === 'DEGRADED'
 
-      progress.value = Math.min(progress.value + 10, 75)
+      // 遵循任务进度 percent 强驱动，此处不盲目自增进度
       eventTimeline.value.push({
         timestamp: timeStr,
         tag: 'NODE',
         title: `${agent} 核验节点`,
-        content: `状态: ${status} (${elapsed}ms) | 来源: ${payload.source || 'DETERMINISTIC'}${payload.reason ? ' - ' + payload.reason : ''}`,
+        content: `状态: ${status} (${elapsed}ms) | 来源: ${payload.source || 'UNKNOWN'}${payload.reason ? ' - ' + payload.reason : ''}`,
         type: isSuccess ? 'success' : (isDegraded ? 'warning' : 'danger')
       })
     } else if (ev === 'task_progress') {
       const stage = payload.stage || payload.current_stage || ''
       const count = payload.findings_count ?? payload.findings_found ?? 0
-      progress.value = Math.max(progress.value, 70)
+      if (payload.percent != null) {
+        progress.value = Math.max(progress.value, Number(payload.percent))
+      } else {
+        progress.value = Math.max(progress.value, 70)
+      }
+
+      let stageTitle = 'Stage 2: 多智能体并行核查完成'
+      let stageContent = `并行核查完成，发现候选风险项 ${count} 条`
+      let stageTag = 'STAGE_2'
+
+      if (stage === 'STAGE_1_PLAN_GENERATED') {
+        stageTitle = 'Stage 1: 动态审查规划生成完毕'
+        stageContent = `已根据单据要素与风险画像规划核验节点 (${payload.tasks_count || 0} 个任务)`
+        stageTag = 'STAGE_1'
+      } else if (stage === 'STAGE_2_PARALLEL_DONE') {
+        stageTitle = 'Stage 2: 多智能体并行核查完成'
+        stageContent = `并行核查完成，发现候选风险项 ${count} 条`
+        stageTag = 'STAGE_2'
+      } else if (stage === 'STAGE_3_REVIEW_DONE') {
+        stageTitle = 'Stage 3: 终审门禁复核完成'
+        stageContent = `复核确认有效风险项 ${payload.verified_count ?? count} 条`
+        stageTag = 'STAGE_3'
+      } else if (stage === 'STAGE_4_EVALUATED') {
+        stageTitle = 'Stage 4: 风险评级与决策就绪'
+        stageContent = `完成综合评级与审批决策判定`
+        stageTag = 'STAGE_4'
+      }
 
       eventTimeline.value.push({
         timestamp: timeStr,
-        tag: 'PROGRESS',
-        title: 'Stage 2: 多智能体并行核查完成',
-        content: `并行核查完成，发现候选风险项 ${count} 条`,
+        tag: stageTag,
+        title: stageTitle,
+        content: stageContent,
         type: 'primary'
       })
     } else if (ev === 'review_reflect') {
-      progress.value = 85
+      progress.value = Math.max(progress.value, 85)
       const applied = payload.reflection_applied
       const verified = payload.verified_count ?? 0
 
@@ -315,7 +362,14 @@ const getScoreClass = (score) => {
 
 const goToReport = () => {
   handleClose()
-  router.push(`/audits/${props.documentId}`)
+  if (props.taskId) {
+    router.push({
+      path: `/audits/${props.documentId}`,
+      query: { task_id: props.taskId }
+    })
+  } else {
+    router.push(`/audits/${props.documentId}`)
+  }
 }
 </script>
 

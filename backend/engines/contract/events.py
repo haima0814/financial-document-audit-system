@@ -68,6 +68,7 @@ class NodeStatusPayload(BaseModel):
     duration_ms: int = Field(default=0, description="耗时毫秒")
     findings_count: int = Field(default=0, description="检出的风险项数量")
     reason: Optional[str] = Field(default=None, description="降级/跳过/失败原因")
+    source: Optional[str] = Field(default="UNKNOWN", description="执行来源: DETERMINISTIC / LLM_INFERENCE / MOCK / UNKNOWN")
     capabilities_run: List[str] = Field(default_factory=list, description="实际执行的能力集列表")
 
     def model_post_init(self, __context: Any) -> None:
@@ -96,6 +97,8 @@ class ReviewReflectPayload(BaseModel):
 
 class TaskCompletedPayload(BaseModel):
     report_id: int = Field(..., description="落库生成的审计报告 report_id")
+    task_id: Optional[str] = Field(default=None, description="任务ID")
+    percent: int = Field(default=100, description="完成百分比")
     overall_risk_level: str = Field(..., description="综合风险评级")
     risk_score: int = Field(..., ge=0, le=100, description="风控加权总评分")
     final_score: int = Field(default=100, ge=0, le=100, description="综合体检得分")

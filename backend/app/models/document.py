@@ -14,6 +14,7 @@ class FinancialDocument(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     document_no: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(64), unique=True, nullable=True, index=True)
     document_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True) # CORP_PAYMENT, ADVANCE_PAYMENT, BATCH_PAYMENT, EXPENSE_REIMBURSEMENT, TRAVEL_REIMBURSEMENT
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     

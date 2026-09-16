@@ -80,6 +80,7 @@ class FinancialDocumentCreateReq(BaseModel):
     line_items: List[LineItemIn] = Field(default_factory=list)
     attachments: List[AttachmentIn] = Field(default_factory=list)
     invoices: List[InvoiceRecordIn] = Field(default_factory=list)
+    idempotency_key: Optional[str] = Field(default=None, description="前端请求幂等防重键")
 
 
 class FinancialDocumentUpdateReq(BaseModel):
@@ -94,6 +95,7 @@ class FinancialDocumentUpdateReq(BaseModel):
 class FinancialDocumentListItemOut(BaseModel):
     id: int
     document_no: str
+    idempotency_key: Optional[str] = None
     document_type: str
     title: str
     applicant_id: int
