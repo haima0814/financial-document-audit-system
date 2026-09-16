@@ -78,7 +78,7 @@ class DocumentAttachment(Base):
     document_id: Mapped[int] = mapped_column(Integer, ForeignKey("financial_documents.id", ondelete="CASCADE"), nullable=False, index=True)
     file_name: Mapped[str] = mapped_column(String(255), nullable=False)
     file_type: Mapped[str] = mapped_column(String(32), nullable=False) # PDF, PNG, JPG, OFD
-    file_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    file_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     file_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True) # SHA-256
     file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     is_invoice: Mapped[bool] = mapped_column(Boolean, default=True)

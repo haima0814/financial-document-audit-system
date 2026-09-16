@@ -26,8 +26,9 @@
           </el-radio-button>
         </el-radio-group>
 
-        <!-- 锚点开关 -->
+        <!-- 锚点开关 (仅在真实原图模式下展示) -->
         <el-button
+          v-if="hasRealImage && viewMode === 'original'"
           size="small"
           :type="showAnchors ? 'primary' : 'default'"
           @click="showAnchors = !showAnchors"
@@ -47,8 +48,8 @@
       </div>
     </div>
 
-    <!-- 快捷字段高亮滤镜栏 -->
-    <div class="field-filter-bar" v-if="showAnchors && renderedBoxes.length > 0">
+    <!-- 快捷字段高亮滤镜栏 (仅在真实原图且存在锚点时展示) -->
+    <div class="field-filter-bar" v-if="hasRealImage && viewMode === 'original' && showAnchors && renderedBoxes.length > 0">
       <span class="filter-label">视觉锚点筛选：</span>
       <el-tag
         size="small"
@@ -160,35 +161,43 @@
           </svg>
         </div>
 
-        <!-- 模式二：仿真结构化发票外观 -->
+        <!-- 模式二：结构化数字票面 (无真实匹配图片时纯净展示，严禁伪造原图与浮空 BBox) -->
         <div v-else class="mock-invoice-paper">
-          <div class="inv-stamp">发票监制章</div>
+          <div class="inv-stamp">
+            {{ invoiceData.invoice_type === '铁路电子客票' ? '中国铁路客票监制' : '发票监制章' }}
+          </div>
           <div class="inv-header">
-            <div class="inv-title">增值税电子普通发票</div>
+            <div class="inv-title">
+              {{ invoiceData.invoice_type || '增值税电子普通发票' }}
+            </div>
             <div class="inv-meta">
-              <div>发票代码：<span>{{ invoiceData.invoice_code || '011002000111' }}</span></div>
-              <div>发票号码：<span>{{ invoiceData.invoice_number || '23456789' }}</span></div>
-              <div>开票日期：<span>{{ invoiceData.issue_date || '2026-03-12' }}</span></div>
+              <div v-if="invoiceData.invoice_code">发票代码：<span>{{ invoiceData.invoice_code }}</span></div>
+              <div>{{ invoiceData.invoice_type === '铁路电子客票' ? '客票号码' : '发票号码' }}：<span>{{ invoiceData.invoice_number || '-' }}</span></div>
+              <div>{{ invoiceData.invoice_type === '铁路电子客票' ? '乘车日期' : '开票日期' }}：<span>{{ invoiceData.issue_date || '-' }}</span></div>
             </div>
           </div>
 
           <div class="inv-body">
             <div class="inv-row">
               <div class="inv-col buyer">
-                <div class="col-title">购买方名称：{{ invoiceData.buyer_name || '北京智能前沿科技有限公司' }}</div>
-                <div>统一社会信用代码：{{ invoiceData.buyer_tax_id || '91110108MA01XXXXXX' }}</div>
+                <div class="col-title">
+                  {{ invoiceData.invoice_type === '铁路电子客票' ? '乘车人 / 购买方' : '购买方' }}：{{ invoiceData.buyer_name || '北京智能前沿科技有限公司' }}
+                </div>
+                <div v-if="invoiceData.buyer_tax_id">统一社会信用代码：{{ invoiceData.buyer_tax_id }}</div>
               </div>
               <div class="inv-col seller">
-                <div class="col-title">销售方名称：{{ invoiceData.seller_name || '北京神州数码技术有限公司' }}</div>
-                <div>统一社会信用代码：{{ invoiceData.seller_tax_id || '91110108551385082Q' }}</div>
+                <div class="col-title">
+                  {{ invoiceData.invoice_type === '铁路电子客票' ? '承运单位' : '销售方' }}：{{ invoiceData.seller_name || '-' }}
+                </div>
+                <div v-if="invoiceData.seller_tax_id">统一社会信用代码：{{ invoiceData.seller_tax_id }}</div>
               </div>
             </div>
 
             <table class="inv-table">
               <thead>
                 <tr>
-                  <th>货物或应税劳务、服务名称</th>
-                  <th>数量</th>
+                  <th>{{ invoiceData.invoice_type === '铁路电子客票' ? '客运服务项目' : '货物或应税劳务、服务名称' }}</th>
+                  <th>{{ invoiceData.invoice_type === '铁路电子客票' ? '席别' : '数量' }}</th>
                   <th>单价</th>
                   <th>金额</th>
                   <th>税率</th>
@@ -197,61 +206,20 @@
               </thead>
               <tbody>
                 <tr>
-                  <td>{{ invoiceData.item_name || '企业差旅服务费 / 办公用品' }}</td>
-                  <td>1</td>
-                  <td>¥{{ invoiceData.untaxed_amount || invoiceData.total_amount || '1,200.00' }}</td>
-                  <td>¥{{ invoiceData.untaxed_amount || invoiceData.total_amount || '1,200.00' }}</td>
-                  <td>6%</td>
-                  <td>¥{{ invoiceData.tax_amount || '72.00' }}</td>
+                  <td>{{ invoiceData.item_name || (invoiceData.invoice_type === '铁路电子客票' ? '旅客运输服务*客票' : '企业差旅服务费') }}</td>
+                  <td>{{ invoiceData.invoice_type === '铁路电子客票' ? '二等座 (1人)' : '1' }}</td>
+                  <td>¥{{ invoiceData.untaxed_amount || invoiceData.total_amount ? Number(invoiceData.untaxed_amount || invoiceData.total_amount).toFixed(2) : '-' }}</td>
+                  <td>¥{{ invoiceData.untaxed_amount || invoiceData.total_amount ? Number(invoiceData.untaxed_amount || invoiceData.total_amount).toFixed(2) : '-' }}</td>
+                  <td>{{ invoiceData.tax_rate ? (Number(invoiceData.tax_rate) * 100) + '%' : (invoiceData.tax_amount ? '9%' : '免税') }}</td>
+                  <td>¥{{ invoiceData.tax_amount ? Number(invoiceData.tax_amount).toFixed(2) : '0.00' }}</td>
                 </tr>
               </tbody>
             </table>
 
             <div class="inv-total-row">
-              <div>价税合计（大写）：<span>{{ invoiceData.total_amount ? '壹仟贰佰元整' : '壹仟贰佰元整' }}</span></div>
-              <div>（小写）：<strong>¥{{ invoiceData.total_amount || '1,200.00' }}</strong></div>
+              <div>票面总金额：<strong>¥{{ invoiceData.total_amount ? Number(invoiceData.total_amount).toFixed(2) : '0.00' }}</strong></div>
             </div>
           </div>
-
-          <!-- 仿真票面上的 SVG 叠加层 -->
-          <svg
-            v-if="showAnchors"
-            class="bbox-overlay"
-            viewBox="0 0 1000 1000"
-            preserveAspectRatio="none"
-          >
-            <g
-              v-for="(box, idx) in renderedBoxes"
-              :key="idx"
-              class="bbox-group"
-              :class="{ 'is-focused': box.id === activeFilter || activeFilter === 'all' }"
-            >
-              <rect
-                :x="box.box[1]"
-                :y="box.box[0]"
-                :width="Math.max(20, box.box[3] - box.box[1])"
-                :height="Math.max(16, box.box[2] - box.box[0])"
-                :class="['anchor-rect', box.riskLevel || 'normal', { pulse: box.highlighted }]"
-              />
-              <g class="anchor-label-group">
-                <rect
-                  :x="box.box[1]"
-                  :y="box.box[0] > 26 ? box.box[0] - 22 : box.box[2] + 4"
-                  :width="Math.max(60, box.label.length * 11 + 16)"
-                  height="20"
-                  :class="['label-bg', box.riskLevel || 'normal']"
-                  rx="3"
-                />
-                <text
-                  :x="box.box[1] + 8"
-                  :y="box.box[0] > 26 ? box.box[0] - 8 : box.box[2] + 18"
-                  class="anchor-label-text"
-                >
-                  {{ box.label }}
-                </text>
-              </g>
-            </g>
-          </svg>
         </div>
       </div>
     </div>
@@ -350,8 +318,12 @@ const selectedFindingAnchor = computed(() => {
   return props.selectedFinding?.primary_visual_anchor?.box_2d || null
 })
 
-// 动态合成视觉锚点列表
+// 动态合成视觉锚点列表 (仅在有真实原图且处于原图模式下才计算并展示)
 const allBoxes = computed(() => {
+  if (!hasRealImage.value || viewMode.value !== 'original') {
+    return []
+  }
+
   const list = []
 
   // 1. 如果有选中的风险项，优先级最高
@@ -405,15 +377,6 @@ const allBoxes = computed(() => {
       riskLevel: 'info',
       highlighted: activeFilter.value === 'issue_date'
     })
-  }
-
-  // 3. 如果没有从真实图片提取到 BBox 且为数字模板视图，提供兜底标准增值税锚点
-  if (list.length === 0 && viewMode.value === 'digital') {
-    list.push(
-      { id: 'total_amount', box: [730, 680, 780, 950], label: '价税合计总额', riskLevel: 'amount', highlighted: false },
-      { id: 'invoice_number', box: [125, 650, 155, 950], label: '发票号码 (No)', riskLevel: 'code', highlighted: false },
-      { id: 'seller_info', box: [200, 510, 320, 950], label: '销售方信息 (USCC)', riskLevel: 'seller', highlighted: false }
-    )
   }
 
   return list

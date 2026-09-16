@@ -168,8 +168,8 @@ async def seed():
             amount=Decimal("320.00"), city_name="北京"
         ))
         att1 = DocumentAttachment(
-            document_id=1, file_name="滴滴出行行程电子客票.png", file_type="PNG",
-            file_path="/uploads/invoices/inv_4bb34d2b5c99.png", file_hash="hash_seed_01",
+            document_id=1, file_name="滴滴出行行程电子客票.pdf", file_type="PDF",
+            file_path=None, file_hash="hash_seed_01",
             file_size_bytes=815000, is_invoice=True, ocr_status="SUCCESS"
         )
         db.add(att1)
@@ -183,13 +183,8 @@ async def seed():
             buyer_name="北京智能前沿科技有限公司", buyer_tax_id="91110108MA01XXXXXX",
             issue_date="2026-03-11", invoice_hash="sha256_seed_01",
             raw_payload={
-                "bbox_positions": {
-                    "total_amount": [420, 680, 480, 940],
-                    "invoice_number": [70, 680, 120, 950],
-                    "seller_name": [160, 200, 210, 450],
-                    "issue_date": [90, 700, 130, 900]
-                },
-                "file_path": "/uploads/invoices/inv_4bb34d2b5c99.png"
+                "bbox_positions": None,
+                "file_path": None
             }
         ))
         report1 = ReviewReport(
@@ -255,8 +250,8 @@ async def seed():
         ))
 
         att2 = DocumentAttachment(
-            document_id=2, file_name="上海全季酒店住宿费专票.png", file_type="PNG",
-            file_path="/uploads/invoices/inv_d87211a2b22c.png", file_hash="hash_seed_02",
+            document_id=2, file_name="上海全季酒店住宿费专票.pdf", file_type="PDF",
+            file_path=None, file_hash="hash_seed_02",
             file_size_bytes=28815, is_invoice=True, ocr_status="SUCCESS"
         )
         db.add(att2)
@@ -270,14 +265,8 @@ async def seed():
             buyer_name="北京智能前沿科技有限公司", buyer_tax_id="91110108MA01XXXXXX",
             issue_date="2026-03-10", invoice_hash="sha256_seed_02",
             raw_payload={
-                "bbox_positions": {
-                    "total_amount": [420, 680, 480, 940],
-                    "invoice_number": [70, 680, 120, 950],
-                    "seller_name": [160, 200, 210, 450],
-                    "seller_tax_id": [215, 200, 255, 450],
-                    "issue_date": [90, 700, 130, 900]
-                },
-                "file_path": "/uploads/invoices/inv_d87211a2b22c.png"
+                "bbox_positions": None,
+                "file_path": None
             }
         ))
 
@@ -326,7 +315,7 @@ async def seed():
             expected_value={"is_duplicate": False},
             discrepancy_amount=Decimal("850.00"),
             is_overridable=False, # 一票否决，严禁覆盖！
-            primary_visual_anchor={"box_2d": [70, 680, 120, 950], "label": "发票号码 20227891 (历史已报销查重拦截)"},
+            primary_visual_anchor=None,
             suggestion="一票否决终止审批流并直接驳回，责令经办人自查。"
         ))
         inst2 = ApprovalInstance(
@@ -358,8 +347,8 @@ async def seed():
             amount=Decimal("2400.00"), city_name="北京"
         ))
         att3 = DocumentAttachment(
-            document_id=3, file_name="技术服务费普通发票.png", file_type="PNG",
-            file_path="/uploads/invoices/inv_aa7910dfa882.png", file_hash="hash_88203001",
+            document_id=3, file_name="技术服务费普通发票.pdf", file_type="PDF",
+            file_path=None, file_hash="hash_88203001",
             file_size_bytes=28925, is_invoice=True, ocr_status="SUCCESS"
         )
         db.add(att3)
@@ -371,12 +360,8 @@ async def seed():
             seller_tax_id="91110108MA01TEST99", seller_name="北京创新网络技术服务工作室", issue_date="2026-03-10",
             invoice_hash="sha256_011002000222_88203001",
             raw_payload={
-                "bbox_positions": {
-                    "invoice_number": [70, 680, 120, 950],
-                    "total_amount": [420, 680, 480, 940],
-                    "seller_name": [160, 200, 210, 450]
-                },
-                "file_path": "/uploads/invoices/inv_aa7910dfa882.png"
+                "bbox_positions": None,
+                "file_path": None
             }
         ))
         report3 = ReviewReport(
@@ -444,8 +429,8 @@ async def seed():
         ))
 
         att4 = DocumentAttachment(
-            document_id=4, file_name="高铁车票报销凭证.jpg", file_type="JPG",
-            file_path="/uploads/invoices/inv_d70ddfc1e7a2.jpg", file_hash="hash_seed_04",
+            document_id=4, file_name="高铁车票报销凭证.pdf", file_type="PDF",
+            file_path=None, file_hash="hash_seed_04",
             file_size_bytes=1289752, is_invoice=True, ocr_status="SUCCESS"
         )
         db.add(att4)
@@ -459,11 +444,8 @@ async def seed():
             buyer_name="北京智能前沿科技有限公司", buyer_tax_id="91110108MA01XXXXXX",
             issue_date="2026-03-12", invoice_hash="sha256_seed_04",
             raw_payload={
-                "bbox_positions": {
-                    "total_amount": [420, 680, 480, 940],
-                    "invoice_number": [70, 680, 120, 950]
-                },
-                "file_path": "/uploads/invoices/inv_d70ddfc1e7a2.jpg"
+                "bbox_positions": None,
+                "file_path": None
             }
         ))
 
@@ -519,23 +501,23 @@ async def seed():
         ))
 
         # -------------------------------------------------------------
-        # 场景 5: 日常办公用品草稿单 (待提交体验) -> DRAFT
+        # 场景 5: 真实原件真图与 OCR 锚点体验单 (待提交草稿) -> DRAFT
         # -------------------------------------------------------------
         doc5 = FinancialDocument(
             id=5, document_no="EXP-20260316-DFT005", document_type="EXPENSE_REIMBURSEMENT",
-            title="研发部日常办公文具与实验耗材采购 (待提交草稿示例)",
+            title="商务出差住宿费报销 (真实原件真图与 OCR 体验单)",
             applicant_id=5, department_name="市场营销部",
-            total_amount=Decimal("680.00"), currency="CNY", status="DRAFT",
+            total_amount=Decimal("700.00"), currency="CNY", status="DRAFT",
             current_version=1
         )
         db.add(doc5)
         await db.flush()
         db.add(DocumentLineItem(
-            document_id=5, line_no=1, expense_type="办公用品", item_desc="打印纸与马克笔等耗材",
-            amount=Decimal("680.00"), city_name="北京"
+            document_id=5, line_no=1, expense_type="住宿费", item_desc="陕西世纪金源大饭店住宿",
+            amount=Decimal("700.00"), city_name="西安"
         ))
         att5 = DocumentAttachment(
-            document_id=5, file_name="办公用品采购发票.png", file_type="PNG",
+            document_id=5, file_name="陕西世纪金源大饭店住宿发票.png", file_type="PNG",
             file_path="/uploads/invoices/inv_4bb34d2b5c99.png", file_hash="hash_seed_05",
             file_size_bytes=815036, is_invoice=True, ocr_status="SUCCESS"
         )
@@ -543,16 +525,18 @@ async def seed():
         await db.flush()
 
         db.add(InvoiceRecord(
-            document_id=5, attachment_id=att5.id, invoice_code="011002000555", invoice_number="55667788",
-            invoice_type="增值税电子普通发票", total_amount=Decimal("680.00"), untaxed_amount=Decimal("641.51"),
-            tax_amount=Decimal("38.49"), tax_rate=Decimal("0.0600"),
-            seller_name="北京晨光文具科技有限公司", seller_tax_id="91110108551385082Q",
-            buyer_name="北京智能前沿科技有限公司", buyer_tax_id="91110108MA01XXXXXX",
-            issue_date="2026-03-15", invoice_hash="sha256_seed_05",
+            document_id=5, attachment_id=att5.id, invoice_code="246120000001", invoice_number="0101644605",
+            invoice_type="增值税电子普通发票", total_amount=Decimal("700.00"), untaxed_amount=Decimal("660.38"),
+            tax_amount=Decimal("39.62"), tax_rate=Decimal("0.0600"),
+            seller_name="陕西世纪金源大饭店有限公司", seller_tax_id="91610132742813133A",
+            buyer_name="陕西西咸新区秦汉新城中诺机械科技有限公司", buyer_tax_id="91611104MA70W95J4N",
+            issue_date="2024-11-07", invoice_hash="sha256_seed_05",
             raw_payload={
                 "bbox_positions": {
-                    "total_amount": [420, 680, 480, 940],
-                    "invoice_number": [70, 680, 120, 950]
+                    "total_amount": [742, 695, 792, 942],
+                    "invoice_number": [128, 640, 160, 940],
+                    "seller_info": [830, 210, 920, 520],
+                    "issue_date": [165, 715, 195, 930]
                 },
                 "file_path": "/uploads/invoices/inv_4bb34d2b5c99.png"
             }

@@ -29,7 +29,7 @@ class LineItemOut(LineItemIn):
 class AttachmentIn(BaseModel):
     file_name: str
     file_type: str # PDF, PNG, JPG
-    file_path: str
+    file_path: Optional[str] = None
     file_hash: str
     file_size_bytes: int
     is_invoice: bool = True
