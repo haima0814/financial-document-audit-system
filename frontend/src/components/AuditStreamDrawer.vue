@@ -1,7 +1,7 @@
 <template>
   <el-drawer
     v-model="visible"
-    title="⚡ 多智能体实时风控审查流水线"
+    title="⚡ 多智能体审查流水线实时轨迹 (SSE)"
     size="520px"
     :before-close="handleClose"
     direction="rtl"
@@ -10,48 +10,54 @@
       <!-- 顶部状态与进度条 -->
       <div class="stream-header">
         <div class="status-badge">
-          <el-tag :type="isCompleted ? 'success' : 'primary'" effect="dark">
-            {{ isCompleted ? '审查完成' : '多智能体并行推理中...' }}
+          <el-tag :type="statusTagType" effect="dark">
+            {{ statusText }}
           </el-tag>
-          <span class="task-id-text">Task: {{ taskId }}</span>
+          <span class="task-id-text">Task: {{ taskId || '-' }}</span>
         </div>
-        <el-progress :percentage="progress" :status="isCompleted ? 'success' : ''" :stroke-width="10" />
+        <el-progress :percentage="progress" :status="isCompleted ? 'success' : (isFailed ? 'exception' : '')" :stroke-width="8" />
       </div>
 
-      <!-- 四阶段流水线状态指示卡片 -->
-      <div class="stages-grid">
-        <div :class="['stage-card', getStageStatus('STAGE_1')]">
-          <div class="stage-num">1</div>
-          <div class="stage-name">票据事实摄入</div>
-        </div>
-        <div :class="['stage-card', getStageStatus('STAGE_2')]">
-          <div class="stage-num">2</div>
-          <div class="stage-name">4大Agent并行审查</div>
-        </div>
-        <div :class="['stage-card', getStageStatus('STAGE_3')]">
-          <div class="stage-num">3</div>
-          <div class="stage-name">终审消歧门禁</div>
-        </div>
-        <div :class="['stage-card', getStageStatus('STAGE_4')]">
-          <div class="stage-num">4</div>
-          <div class="stage-name">综合体检报告</div>
-        </div>
-      </div>
+      <!-- 实时事件时间线 (Element Plus el-timeline) -->
+      <div class="timeline-container" ref="timelineRef">
+        <el-timeline v-if="eventTimeline.length">
+          <el-timeline-item
+            v-for="(item, idx) in eventTimeline"
+            :key="idx"
+            :type="item.type"
+            :color="item.color"
+            :timestamp="item.timestamp"
+            placement="top"
+          >
+            <div class="timeline-card">
+              <div class="timeline-title">
+                <el-tag v-if="item.tag" :type="item.type" size="small" effect="plain" class="event-tag">
+                  {{ item.tag }}
+                </el-tag>
+                <strong>{{ item.title }}</strong>
+              </div>
+              <div class="timeline-content">{{ item.content }}</div>
+            </div>
+          </el-timeline-item>
+        </el-timeline>
 
-      <!-- 实时流式事件日志输出 -->
-      <div class="logs-wrapper" ref="logsRef">
-        <div v-for="(log, idx) in eventLogs" :key="idx" class="log-item">
-          <span class="log-time">{{ log.time }}</span>
-          <el-tag size="small" :type="getTagType(log.event)">{{ log.event }}</el-tag>
-          <div class="log-content">{{ log.message }}</div>
+        <div v-if="!isCompleted && !isFailed" class="stream-waiting">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          <span>多智能体协同分析中，实时事件推送中...</span>
         </div>
+
+        <el-empty
+          v-if="!eventTimeline.length && (isCompleted || isFailed)"
+          description="暂无审查事件记录"
+          :image-size="60"
+        />
       </div>
 
       <!-- 审查完成汇总与跳转 -->
       <div v-if="isCompleted" class="stream-footer">
         <div class="score-summary">
-          <span>综合风控评分：</span>
-          <strong :class="getScoreClass(summary.risk_score)">{{ summary.risk_score || 100 }} 分</strong>
+          <span>风控评分：</span>
+          <strong :class="getScoreClass(summary.risk_score)">{{ summary.risk_score ?? 100 }} 分</strong>
           <el-tag :type="summary.overall_risk_level === 'high' ? 'danger' : (summary.overall_risk_level === 'medium' ? 'warning' : 'success')">
             {{ (summary.overall_risk_level || 'low').toUpperCase() }} 风险
           </el-tag>
@@ -65,9 +71,9 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import api from '@/api'
+import { Loading } from '@element-plus/icons-vue'
 
 const props = defineProps({
   modelValue: Boolean,
@@ -79,174 +85,41 @@ const emit = defineEmits(['update:modelValue', 'completed'])
 const router = useRouter()
 
 const visible = ref(props.modelValue)
-const progress = ref(10)
+const progress = ref(5)
 const isCompleted = ref(false)
-const eventLogs = ref([])
+const isFailed = ref(false)
+const eventTimeline = ref([])
 const summary = ref({})
-const currentStage = ref('STAGE_1')
-const logsRef = ref(null)
-let ws = null
-let pollTimer = null
+const timelineRef = ref(null)
+
+let abortController = null
+
+const statusText = computed(() => {
+  if (isCompleted.value) return '审查完成'
+  if (isFailed.value) return '审查异常中断'
+  return '多智能体实时审查中 (SSE)'
+})
+
+const statusTagType = computed(() => {
+  if (isCompleted.value) return 'success'
+  if (isFailed.value) return 'danger'
+  return 'primary'
+})
 
 watch(() => props.modelValue, (val) => {
   visible.value = val
-  if (val && (props.taskId || props.documentId)) {
+  if (val && props.taskId) {
     initPipeline(props.taskId)
   } else {
     cleanup()
   }
 })
 
-const initPipeline = (tid) => {
-  eventLogs.value = []
-  progress.value = 15
-  isCompleted.value = false
-  currentStage.value = 'STAGE_1'
-
-  // 1. 尝试连接 WebSocket
-  if (tid) {
-    initWebSocket(tid)
-  }
-
-  // 2. 启动智能容灾轮询 (即使 WebSocket 出现网络抖动/重连，也能毫秒级捕获体检报告)
-  startPolling()
-}
-
-const initWebSocket = (tid) => {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const wsUrl = `${protocol}//${window.location.host}/ws/audit/${tid}`
-
-  try {
-    ws = new WebSocket(wsUrl)
-    ws.onopen = () => {
-      console.log('[WS Connected] 审计事件总线已连接:', wsUrl)
-    }
-    ws.onmessage = (evt) => {
-      try {
-        const envelope = JSON.parse(evt.data)
-        if (envelope.event === 'PING') return
-
-        const timeStr = new Date().toLocaleTimeString()
-        const payload = envelope.data || {}
-        let msg = JSON.stringify(payload)
-
-        if (envelope.event === 'TASK_STARTED') {
-          msg = `已加载单据明细 ${payload.items_count || 0} 项，关联发票 ${payload.invoices_count || 0} 张`
-          currentStage.value = 'STAGE_2'
-          if (progress.value < 35) progress.value = 35
-        } else if (envelope.event === 'TASK_PROGRESS') {
-          if (payload.stage === 'STAGE_2_PARALLEL_DONE') {
-            msg = `多智能体并行分析完毕，初步检出风险项 ${payload.findings_count} 条`
-            currentStage.value = 'STAGE_3'
-            if (progress.value < 75) progress.value = 75
-          } else if (payload.stage === 'STAGE_3_REVIEW_DONE') {
-            msg = `风控门禁质检消歧完成，确认有效证据链 ${payload.verified_count} 条`
-            currentStage.value = 'STAGE_4'
-            if (progress.value < 90) progress.value = 90
-          }
-        } else if (envelope.event === 'TASK_COMPLETED') {
-          msg = `体检报告生成完成！综合风险等级: ${(payload.overall_risk_level || 'LOW').toUpperCase()}，评分: ${payload.risk_score} 分`
-          progress.value = 100
-          isCompleted.value = true
-          summary.value = payload
-          stopPolling()
-          emit('completed', payload)
-        }
-
-        eventLogs.value.push({ time: timeStr, event: envelope.event, message: msg })
-        nextTick(() => {
-          if (logsRef.value) logsRef.value.scrollTop = logsRef.value.scrollHeight
-        })
-      } catch (e) {
-        console.error('WS parse error:', e)
-      }
-    }
-
-    ws.onerror = (err) => {
-      console.warn('WebSocket connect error, fallback polling active:', err)
-    }
-
-    ws.onclose = () => {
-      console.log('WebSocket closed.')
-    }
-  } catch (err) {
-    console.warn('WebSocket connect failed, using fallback polling:', err)
-  }
-}
-
-const startPolling = () => {
-  stopPolling()
-  let pollCount = 0
-
-  pollTimer = setInterval(async () => {
-    if (isCompleted.value) {
-      stopPolling()
-      return
-    }
-
-    pollCount++
-    // 进度条平滑过渡提升体验
-    if (progress.value < 35) {
-      progress.value = 35
-      currentStage.value = 'STAGE_2'
-    } else if (progress.value < 75 && pollCount >= 2) {
-      progress.value = 75
-      currentStage.value = 'STAGE_3'
-    } else if (progress.value < 90 && pollCount >= 3) {
-      progress.value = 90
-      currentStage.value = 'STAGE_4'
-    }
-
-    // 检查是否已有完成的风控体检报告
-    if (props.documentId) {
-      try {
-        const rep = await api.get(`/audits/reports/${props.documentId}`)
-        if (rep && rep.id && !isCompleted.value) {
-          isCompleted.value = true
-          progress.value = 100
-          currentStage.value = 'STAGE_4'
-          summary.value = {
-            report_id: rep.id,
-            overall_risk_level: rep.overall_risk_level,
-            risk_score: rep.final_score,
-            high_count: rep.high_risks_count,
-            medium_count: rep.medium_risks_count,
-            low_count: rep.low_risks_count
-          }
-          const timeStr = new Date().toLocaleTimeString()
-          eventLogs.value.push({
-            time: timeStr,
-            event: 'TASK_COMPLETED',
-            message: `智能风控体检完成！综合风险等级: ${(rep.overall_risk_level || 'LOW').toUpperCase()}，评分: ${rep.final_score} 分`
-          })
-          stopPolling()
-          emit('completed', summary.value)
-        }
-      } catch (e) {
-        // 报告仍在生成中，属于正常等待
-      }
-    }
-
-    // 最多轮询 20 次 (约 16 秒) 防止僵尸定时器
-    if (pollCount > 20) {
-      stopPolling()
-    }
-  }, 800)
-}
-
-const stopPolling = () => {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
-}
-
 const cleanup = () => {
-  if (ws) {
-    ws.close()
-    ws = null
+  if (abortController) {
+    abortController.abort()
+    abortController = null
   }
-  stopPolling()
 }
 
 const handleClose = () => {
@@ -258,20 +131,180 @@ onUnmounted(() => {
   cleanup()
 })
 
+const initPipeline = async (tid) => {
+  cleanup()
+  eventTimeline.value = []
+  progress.value = 10
+  isCompleted.value = false
+  isFailed.value = false
+  summary.value = {}
 
-const getStageStatus = (stage) => {
-  const order = ['STAGE_1', 'STAGE_2', 'STAGE_3', 'STAGE_4']
-  const curIdx = order.indexOf(currentStage.value)
-  const targetIdx = order.indexOf(stage)
-  if (isCompleted.value || curIdx > targetIdx) return 'done'
-  if (curIdx === targetIdx) return 'active'
-  return 'pending'
+  if (!tid) return
+
+  abortController = new AbortController()
+  const token = localStorage.getItem('token')
+
+  try {
+    const response = await fetch(`/api/v1/audits/events/${tid}`, {
+      headers: {
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+      },
+      signal: abortController.signal
+    })
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        isFailed.value = true
+        eventTimeline.value.push({
+          timestamp: new Date().toLocaleTimeString(),
+          tag: 'AUTH_FAILED',
+          title: '认证鉴权失败',
+          content: '登录态失效或无权查看该任务的审核事件流',
+          type: 'danger'
+        })
+        return
+      }
+      throw new Error(`SSE 连接失败 (HTTP ${response.status})`)
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+
+      let currentEvent = 'message'
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed || trimmed.startsWith(':')) {
+          // 保活心跳 ping
+          continue
+        }
+        if (trimmed.startsWith('event:')) {
+          currentEvent = trimmed.substring(6).trim()
+        } else if (trimmed.startsWith('data:')) {
+          const dataStr = trimmed.substring(5).trim()
+          handleEventMessage(currentEvent, dataStr)
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      return
+    }
+    console.warn('[SSE] Event stream interrupted:', err)
+    if (!isCompleted.value) {
+      isFailed.value = true
+      eventTimeline.value.push({
+        timestamp: new Date().toLocaleTimeString(),
+        tag: 'DISCONNECT',
+        title: '事件通道中断',
+        content: err.message || '网络连接异常中断',
+        type: 'warning'
+      })
+    }
+  }
 }
 
-const getTagType = (ev) => {
-  if (ev === 'TASK_COMPLETED') return 'success'
-  if (ev === 'TASK_STARTED') return 'primary'
-  return 'info'
+const handleEventMessage = (eventName, dataStr) => {
+  try {
+    const envelope = JSON.parse(dataStr)
+    const timeStr = envelope.timestamp
+      ? new Date(envelope.timestamp).toLocaleTimeString()
+      : new Date().toLocaleTimeString()
+    const payload = envelope.data || envelope
+
+    const ev = (eventName || envelope.event || '').toLowerCase()
+
+    if (ev === 'task_started') {
+      progress.value = 25
+      eventTimeline.value.push({
+        timestamp: timeStr,
+        tag: 'STAGE_1',
+        title: '单据事实与凭证摄入完成',
+        content: `摄入明细 ${payload.items_count || 0} 项，关联发票 ${payload.invoices_count || 0} 张`,
+        type: 'primary'
+      })
+    } else if (ev === 'node_status') {
+      const agent = payload.agent_name || payload.role || 'Agent'
+      const status = payload.status || 'SUCCESS'
+      const elapsed = payload.elapsed_ms ?? payload.duration_ms ?? 0
+      const isSuccess = status === 'SUCCESS'
+      const isDegraded = status === 'DEGRADED'
+
+      progress.value = Math.min(progress.value + 10, 75)
+      eventTimeline.value.push({
+        timestamp: timeStr,
+        tag: 'NODE',
+        title: `${agent} 核验节点`,
+        content: `状态: ${status} (${elapsed}ms) | 来源: ${payload.source || 'DETERMINISTIC'}${payload.reason ? ' - ' + payload.reason : ''}`,
+        type: isSuccess ? 'success' : (isDegraded ? 'warning' : 'danger')
+      })
+    } else if (ev === 'task_progress') {
+      const stage = payload.stage || payload.current_stage || ''
+      const count = payload.findings_count ?? payload.findings_found ?? 0
+      progress.value = Math.max(progress.value, 70)
+
+      eventTimeline.value.push({
+        timestamp: timeStr,
+        tag: 'PROGRESS',
+        title: 'Stage 2: 多智能体并行核查完成',
+        content: `并行核查完成，发现候选风险项 ${count} 条`,
+        type: 'primary'
+      })
+    } else if (ev === 'review_reflect') {
+      progress.value = 85
+      const applied = payload.reflection_applied
+      const verified = payload.verified_count ?? 0
+
+      eventTimeline.value.push({
+        timestamp: timeStr,
+        tag: 'STAGE_3',
+        title: 'Stage 3: 终审门禁反思消歧 (ReviewerReflector)',
+        content: applied
+          ? `已执行反思消歧，最终确认有效风险项 ${verified} 条`
+          : '终审门禁复核通过，未触发消歧',
+        type: applied ? 'warning' : 'success'
+      })
+    } else if (ev === 'task_completed') {
+      progress.value = 100
+      isCompleted.value = true
+      summary.value = payload
+
+      eventTimeline.value.push({
+        timestamp: timeStr,
+        tag: 'STAGE_4',
+        title: 'Stage 4: 风控体检报告生成归档',
+        content: `审核完毕！综合评分: ${payload.risk_score ?? payload.final_score ?? 100} 分，风险等级: ${(payload.overall_risk_level || 'LOW').toUpperCase()}`,
+        type: 'success'
+      })
+
+      emit('completed', payload)
+    } else if (ev === 'task_failed') {
+      isFailed.value = true
+      eventTimeline.value.push({
+        timestamp: timeStr,
+        tag: 'ERROR',
+        title: '审核流水线执行失败',
+        content: payload.error_message || '任务异常中止',
+        type: 'danger'
+      })
+    }
+
+    nextTick(() => {
+      if (timelineRef.value) {
+        timelineRef.value.scrollTop = timelineRef.value.scrollHeight
+      }
+    })
+  } catch (e) {
+    console.error('[SSE] Failed to parse event envelope:', e, dataStr)
+  }
 }
 
 const getScoreClass = (score) => {
@@ -312,68 +345,51 @@ const goToReport = () => {
   font-family: monospace;
 }
 
-.stages-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-}
-
-.stage-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 8px 4px;
-  border-radius: 6px;
-  background: #f1f5f9;
-  font-size: 11px;
-  text-align: center;
-  border: 1px solid #e2e8f0;
-  transition: all 0.3s;
-}
-
-.stage-card.active {
-  background: #e0f2fe;
-  border-color: #38bdf8;
-  color: #0369a1;
-  font-weight: bold;
-}
-
-.stage-card.done {
-  background: #f0fdf4;
-  border-color: #86efac;
-  color: #15803d;
-}
-
-.stage-num {
-  font-size: 14px;
-  font-weight: 800;
-  margin-bottom: 2px;
-}
-
-.logs-wrapper {
+.timeline-container {
   flex: 1;
-  background: #0f172a;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
   border-radius: 8px;
-  padding: 12px;
+  padding: 16px;
   overflow-y: auto;
-  font-family: Consolas, Monaco, monospace;
+}
+
+.timeline-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 8px 12px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.timeline-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #1e293b;
+  margin-bottom: 4px;
+}
+
+.event-tag {
+  font-size: 11px;
+}
+
+.timeline-content {
   font-size: 12px;
-}
-
-.log-item {
-  margin-bottom: 8px;
-  line-height: 1.5;
-}
-
-.log-time {
   color: #64748b;
-  margin-right: 8px;
+  line-height: 1.5;
+  word-break: break-all;
 }
 
-.log-content {
-  color: #cbd5e1;
-  margin-top: 2px;
-  word-break: break-all;
+.stream-waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #3b82f6;
+  font-size: 12px;
+  padding: 12px 0;
+  justify-content: center;
 }
 
 .stream-footer {

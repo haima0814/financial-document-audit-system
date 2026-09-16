@@ -37,16 +37,44 @@ class BaseEventEnvelope(BaseModel):
 
 # --- 具体的事件业务载荷 DTO (Data Payloads) ---
 
+class TaskStartedPayload(BaseModel):
+    current_stage: str = Field(default="STAGE_1_PARSED", description="当前所处阶段描述")
+    items_count: int = Field(default=0, description="明细行项数")
+    invoices_count: int = Field(default=0, description="关联发票张数")
+    execution_plan: Optional[Dict[str, Any]] = Field(default=None, description="审核执行规划快照")
+
 class TaskProgressPayload(BaseModel):
     percent: int = Field(..., ge=0, le=100, description="总体进度百分比")
     current_stage: str = Field(..., description="当前所处阶段描述")
+    stage: Optional[str] = Field(default=None, description="兼容旧版字段")
     active_roles: List[AgentRoleEnum] = Field(default_factory=list, description="正在活跃计算的角色")
+    explanation: Optional[str] = Field(default=None, description="阶段执行说明")
+    planned_tasks: List[str] = Field(default_factory=list, description="规划的任务列表")
+    total_capabilities: int = Field(default=0, description="规划能力集总数")
+    findings_count: int = Field(default=0, description="检出的风险项数量")
+    verified_count: int = Field(default=0, description="复核消歧后有效风险项数")
+    reflection_applied: Optional[bool] = Field(default=None, description="是否触发了反思消歧")
+    agent_results: List[Dict[str, Any]] = Field(default_factory=list, description="各智能体执行结果简报")
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.stage:
+            self.stage = self.current_stage
 
 class NodeStatusPayload(BaseModel):
     role: AgentRoleEnum = Field(..., description="节点角色")
-    status: str = Field(..., description="状态: RUNNING / COMPLETED / FAILED / SKIPPED")
-    message: str = Field(..., description="节点状态说明")
-    elapsed_ms: int = Field(default=0, description="耗时毫秒")
+    status: str = Field(..., description="状态: PLANNED / RUNNING / SUCCESS / DEGRADED / FAILED / TIMEOUT / SKIPPED")
+    message: str = Field(default="", description="节点状态说明")
+    elapsed_ms: int = Field(default=0, description="耗时毫秒 (兼容字段)")
+    duration_ms: int = Field(default=0, description="耗时毫秒")
+    findings_count: int = Field(default=0, description="检出的风险项数量")
+    reason: Optional[str] = Field(default=None, description="降级/跳过/失败原因")
+    capabilities_run: List[str] = Field(default_factory=list, description="实际执行的能力集列表")
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.duration_ms and self.elapsed_ms:
+            self.duration_ms = self.elapsed_ms
+        if not self.elapsed_ms and self.duration_ms:
+            self.elapsed_ms = self.duration_ms
 
 class EvidenceFoundPayload(BaseModel):
     evidence: EvidenceRecord = Field(..., description="捕获到的证据对象")
@@ -56,18 +84,53 @@ class RiskDetectedPayload(BaseModel):
     finding: RiskFindingContract = Field(..., description="检出的风险项")
     realtime_badge: RiskLevelEnum = Field(..., description="用于前端界面右上角弹出的告警角标")
 
+class ReviewReflectPayload(BaseModel):
+    current_stage: str = Field(default="STAGE_3_REVIEW_REFLECT", description="当前所处阶段描述")
+    stage: Optional[str] = Field(default="STAGE_3_REVIEW_REFLECT", description="兼容旧版字段")
+    disambiguated_count: int = Field(default=0, description="完成消歧核减的风险项数量")
+    reflection_logs: List[Dict[str, Any]] = Field(default_factory=list, description="二阶反思消歧审计日志")
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.stage:
+            self.stage = self.current_stage
+
 class TaskCompletedPayload(BaseModel):
     report_id: int = Field(..., description="落库生成的审计报告 report_id")
-    overall_risk_level: RiskLevelEnum = Field(..., description="综合风险评级")
+    overall_risk_level: str = Field(..., description="综合风险评级")
     risk_score: int = Field(..., ge=0, le=100, description="风控加权总评分")
+    final_score: int = Field(default=100, ge=0, le=100, description="综合体检得分")
     high_risks_count: int = Field(..., description="高危数量")
     medium_risks_count: int = Field(..., description="中危数量")
     low_risks_count: int = Field(..., description="低危数量")
-    summary: str = Field(..., description="执行摘要草拟文本")
+    high_count: Optional[int] = Field(default=None, description="兼容旧版字段")
+    medium_count: Optional[int] = Field(default=None, description="兼容旧版字段")
+    low_count: Optional[int] = Field(default=None, description="兼容旧版字段")
+    summary: str = Field(default="", description="执行摘要草拟文本")
+    audit_completeness: str = Field(default="COMPLETE", description="审核完整度状态")
+    decision: Optional[Dict[str, Any]] = Field(default=None, description="审批流转决策摘要")
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.high_count is None:
+            self.high_count = self.high_risks_count
+        if self.medium_count is None:
+            self.medium_count = self.medium_risks_count
+        if self.low_count is None:
+            self.low_count = self.low_risks_count
 
 class TaskFailedPayload(BaseModel):
     error_code: str = Field(..., description="错误编码")
     error_detail: str = Field(..., description="人类可读的错误排查指引")
+
+EVENT_PAYLOAD_SCHEMA_MAP = {
+    EventTypeEnum.TASK_STARTED: TaskStartedPayload,
+    EventTypeEnum.TASK_PROGRESS: TaskProgressPayload,
+    EventTypeEnum.NODE_STATUS: NodeStatusPayload,
+    EventTypeEnum.EVIDENCE_FOUND: EvidenceFoundPayload,
+    EventTypeEnum.RISK_DETECTED: RiskDetectedPayload,
+    EventTypeEnum.REVIEW_REFLECT: ReviewReflectPayload,
+    EventTypeEnum.TASK_COMPLETED: TaskCompletedPayload,
+    EventTypeEnum.TASK_FAILED: TaskFailedPayload,
+}
 
 # =========================================================================
 # 领域事件 (Domain Events - 强一致性业务事实，用于跨进程 Celery/EventBus 解耦回流)

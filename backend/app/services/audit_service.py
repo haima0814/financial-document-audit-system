@@ -160,10 +160,13 @@ class AuditService:
             payload={
                 "report_id": report.id,
                 "overall_risk_level": result.overall_risk_level,
-                "risk_score": result.final_score,
-                "high_count": result.high_risks_count,
-                "medium_count": result.medium_risks_count,
-                "low_count": result.low_risks_count
+                "risk_score": result.risk_score,
+                "final_score": result.final_score,
+                "high_risks_count": result.high_risks_count,
+                "medium_risks_count": result.medium_risks_count,
+                "low_risks_count": result.low_risks_count,
+                "summary": result.summary or "",
+                "audit_completeness": result.audit_completeness,
             }
         )
 
@@ -180,6 +183,23 @@ class AuditService:
             .where(ReviewReport.document_id == document_id)
             .order_by(desc(ReviewReport.created_at))
         )
+        res = await self.db.execute(stmt)
+        return res.scalars().first()
+
+    async def get_report_by_task_id(self, task_id: str) -> Optional[ReviewReport]:
+        """精准按 task_id 查询单据风控体检报告 (附带 findings，彻底杜绝多轮重审历史串味)"""
+        stmt = (
+            select(ReviewReport)
+            .options(selectinload(ReviewReport.findings))
+            .where(ReviewReport.task_id == task_id)
+        )
+        res = await self.db.execute(stmt)
+        return res.scalars().first()
+
+    async def get_task_by_id(self, task_id: str):
+        """精准按 task_id 查询审核分析任务状态"""
+        from app.models.audit import AnalysisTask
+        stmt = select(AnalysisTask).where(AnalysisTask.task_id == task_id)
         res = await self.db.execute(stmt)
         return res.scalars().first()
 

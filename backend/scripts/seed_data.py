@@ -152,11 +152,11 @@ async def seed():
         now = datetime.now(timezone.utc)
 
         # -------------------------------------------------------------
-        # 场景 1: 小额免审直通单 (≤500元低危) -> AUTO_PASS / APPROVED
+        # 场景 1: 小额免审直通单 (≤500元低危) -> COMPLETE + LOW -> AUTO_APPROVE
         # -------------------------------------------------------------
         doc1 = FinancialDocument(
             id=1, document_no="EXP-20260312-PASS01", document_type="EXPENSE_REIMBURSEMENT",
-            title="市内交通打车费 (触发 RULE_AUTO_PASS 小额免审直通)",
+            title="市内交通打车费 (场景A: COMPLETE + LOW -> AUTO_APPROVE 自动放行)",
             applicant_id=5, department_name="市场营销部",
             total_amount=Decimal("320.00"), currency="CNY", status="APPROVED",
             current_version=1, submission_time=now - timedelta(days=2)
@@ -192,40 +192,65 @@ async def seed():
                 "file_path": "/uploads/invoices/inv_4bb34d2b5c99.png"
             }
         ))
-        db.add(ReviewReport(
+        report1 = ReviewReport(
             id=1, task_id="task_seed_01", document_id=1, overall_risk_level="low",
             final_score=100, high_risks_count=0, medium_risks_count=0, low_risks_count=0,
-            summary="智能风控核查无误：单据金额 320 元 ≤ 500 元且全项合规，命中小额免审规则直通放行，未命中任何违规项。"
-        ))
+            summary="智能风控核查无误：单据金额 320 元 ≤ 500 元且全项合规，命中小额免审规则直通放行，未命中任何违规项。",
+            full_report_payload={
+                "audit_completeness": "COMPLETE",
+                "risk_score": 100,
+                "final_score": 100,
+                "overall_risk_level": "low",
+                "approval_decision": {
+                    "action": "AUTO_APPROVE",
+                    "target_state": "APPROVED",
+                    "reason": "单据金额 320.00 元 ≤ 500 元且全项合规，命中小额免审规则直通放行。"
+                },
+                "execution_plan": {
+                    "planned_agents": ["InvoiceOcrAgent", "AmountAgent", "ComplianceAgent", "SupplierAgent"]
+                },
+                "agent_execution_results": {
+                    "InvoiceOcrAgent": {"status": "SUCCESS", "elapsed_ms": 32, "source": "DETERMINISTIC", "reason": "发票票面与印章解析成功"},
+                    "AmountAgent": {"status": "SUCCESS", "elapsed_ms": 18, "source": "DETERMINISTIC", "reason": "价税合计与申报金额精确吻合 (0容差)"},
+                    "ComplianceAgent": {"status": "SUCCESS", "elapsed_ms": 25, "source": "DETERMINISTIC", "reason": "未触发任何合规红线与超标"},
+                    "SupplierAgent": {"status": "SUCCESS", "elapsed_ms": 29, "source": "DETERMINISTIC", "reason": "供应商经营资质存续合规"}
+                }
+            }
+        )
+        db.add(report1)
+        await db.flush()
+
         inst1 = ApprovalInstance(
-            id=1, workflow_id=2, document_id=1, status="COMPLETED",
+            id=1, workflow_id=2, document_id=1, report_id=1, audit_version=1, status="COMPLETED",
             start_time=now - timedelta(days=2), end_time=now - timedelta(days=2)
         )
         db.add(inst1)
         await db.flush()
-        db.add(ApprovalTask(
-            instance_id=1, node_id=3, assignee_id=0, status="AUTO_PASSED",
-            comment="系统自动免审直通通过"
+        auto_task1 = ApprovalTask(
+            instance_id=1, node_id=3, assignee_id=None, status="AUTO_PASSED",
+            comment="系统自动免审直通通过", created_at=now - timedelta(days=2), end_time=now - timedelta(days=2)
+        )
+        db.add(auto_task1)
+        await db.flush()
+        db.add(WorkflowStatusLog(
+            instance_id=1, task_id=auto_task1.id, operator_id=None, action="AUTO_PASS",
+            comment="单据金额 320.00 元 ≤ 500 元且全项合规，命中小额免审规则直通放行。"
         ))
 
         # -------------------------------------------------------------
-        # 场景 2: 差旅住宿超标单 (上海住宿 850元/天，限额 500元) -> R05
+        # 场景 2: 跨单重复发票一票否决 -> 不可覆盖 HIGH -> REJECT
         # -------------------------------------------------------------
         doc2 = FinancialDocument(
-            id=2, document_no="TRV-20260313-HOTEL2", document_type="TRAVEL_REIMBURSEMENT",
-            title="上海商务出差超标报销 (触发 R05 超标风控)",
+            id=2, document_no="EXP-20260313-VETO02", document_type="EXPENSE_REIMBURSEMENT",
+            title="商务出差差旅报销 (场景B: 跨单重复发票 R08 -> HIGH不可覆盖 -> REJECT 一票否决)",
             applicant_id=5, department_name="市场营销部",
-            total_amount=Decimal("1500.00"), currency="CNY", status="PENDING_APPROVAL",
+            total_amount=Decimal("850.00"), currency="CNY", status="REJECTED",
             current_version=1, submission_time=now - timedelta(days=1)
         )
         db.add(doc2)
         await db.flush()
         db.add(DocumentLineItem(
-            document_id=2, line_no=1, expense_type="交通费", item_desc="京沪高铁二等座往返",
-            amount=Decimal("650.00"), city_name="上海", start_date=now - timedelta(days=3)
-        ))
-        db.add(DocumentLineItem(
-            document_id=2, line_no=2, expense_type="住宿费", item_desc="豪华商务酒店1晚",
+            document_id=2, line_no=1, expense_type="住宿费", item_desc="商务差旅全季酒店1晚",
             amount=Decimal("850.00"), city_name="上海", start_date=now - timedelta(days=2)
         ))
 
@@ -257,40 +282,71 @@ async def seed():
         ))
 
         report2 = ReviewReport(
-            id=2, task_id="task_seed_02", document_id=2, overall_risk_level="medium",
-            final_score=80, high_risks_count=0, medium_risks_count=1, low_risks_count=0,
-            summary="智能风控审查完毕：综合评分 80 分。核心违规项：【差旅住宿费超出城市制度限额】依据《企业差旅管理标准》第3.2条，上海一线城市住宿费上限 500.00 元/天，申报金额 850.00 元，超标 350.00 元。"
+            id=2, task_id="task_seed_02", document_id=2, overall_risk_level="high",
+            final_score=20, high_risks_count=1, medium_risks_count=0, low_risks_count=0,
+            summary="🚨 触犯企业最高风控红线：检出【跨单重复发票报销】（发票号码 20227891 已在前期已办结单据中报销并归档），属于不可覆盖的一票否决违规项，系统直接终止审批流程并予以驳回。",
+            full_report_payload={
+                "audit_completeness": "COMPLETE",
+                "risk_score": 20,
+                "final_score": 20,
+                "overall_risk_level": "high",
+                "approval_decision": {
+                    "action": "REJECT",
+                    "target_state": "REJECTED",
+                    "reason": "检出一票否决高危违规项（不可覆盖），优先于完整度直接驳回: 跨单重复发票报销。"
+                },
+                "findings": [
+                    {
+                        "rule_code": "R08_DUPLICATE_INVOICE",
+                        "rule_name": "跨单重复发票报销",
+                        "risk_level": "high",
+                        "is_overridable": False,
+                        "title": "发票代码 [031001900111] 号码 [20227891] 跨单重复报销"
+                    }
+                ],
+                "execution_plan": {
+                    "planned_agents": ["InvoiceOcrAgent", "AmountAgent", "ComplianceAgent", "SupplierAgent"]
+                },
+                "agent_execution_results": {
+                    "InvoiceOcrAgent": {"status": "SUCCESS", "elapsed_ms": 36, "source": "DETERMINISTIC", "reason": "发票票面提取成功"},
+                    "AmountAgent": {"status": "SUCCESS", "elapsed_ms": 19, "source": "DETERMINISTIC", "reason": "金额平衡计算无误"},
+                    "ComplianceAgent": {"status": "SUCCESS", "elapsed_ms": 48, "source": "DETERMINISTIC", "reason": "在跨期报销库与历史归档单据中匹配到相同发票代码与号码，判定跨单重复报销"},
+                    "SupplierAgent": {"status": "SUCCESS", "elapsed_ms": 27, "source": "DETERMINISTIC", "reason": "供应商资质核验通过"}
+                }
+            }
         )
         db.add(report2)
         await db.flush()
         db.add(RiskFinding(
-            report_id=2, finding_id="find_seed_02", rule_code="R05_POLICY_EXCEEDED",
-            rule_name="差旅住宿费超出城市制度限额", risk_level="medium", agent_role="PolicyAgent",
-            title="上海差旅住宿超标 350.00 元",
-            description="依据《企业差旅管理标准》第3.2条，上海属于一线城市，住宿费报销上限为 500 元/天，本次申报金额为 850 元/天。",
-            actual_value={"city": "上海", "amount_per_day": 850.00},
-            expected_value={"city_tier": "TIER_1", "max_amount": 500.00},
-            discrepancy_amount=Decimal("350.00"),
-            primary_visual_anchor={"box_2d": [420, 680, 480, 940], "label": "发票住宿费金额 850.00元 (超标350元)"},
-            suggestion="按制度上限 500 元核销，差额 350 元由员工个人自理；或提供业务 VP 书面特批由审批人在审批意见中注明。"
+            report_id=2, finding_id="find_seed_02", rule_code="R08_DUPLICATE_INVOICE",
+            rule_name="跨单重复发票报销", risk_level="high", agent_role="ComplianceAgent",
+            title="发票代码 [031001900111] 号码 [20227891] 跨单重复报销",
+            description="依据《企业发票报销查重管理规范》，该发票已在已结案单据 EXP-20260210-001 中审核列支，本次再次作为附件提交申报，触发一票否决红线。",
+            actual_value={"invoice_code": "031001900111", "invoice_number": "20227891", "prior_document_no": "EXP-20260210-001"},
+            expected_value={"is_duplicate": False},
+            discrepancy_amount=Decimal("850.00"),
+            is_overridable=False, # 一票否决，严禁覆盖！
+            primary_visual_anchor={"box_2d": [70, 680, 120, 950], "label": "发票号码 20227891 (历史已报销查重拦截)"},
+            suggestion="一票否决终止审批流并直接驳回，责令经办人自查。"
         ))
         inst2 = ApprovalInstance(
-            id=2, workflow_id=1, document_id=2, status="RUNNING",
-            current_node_id=1, start_time=now - timedelta(days=1)
+            id=2, workflow_id=2, document_id=2, report_id=2, audit_version=1, status="TERMINATED",
+            start_time=now - timedelta(days=1), end_time=now - timedelta(days=1)
         )
         db.add(inst2)
         await db.flush()
-        db.add(ApprovalTask(
-            instance_id=2, node_id=1, assignee_id=2, status="PENDING", # 张经理待办
-            created_at=now - timedelta(days=1)
+        # 一票否决：不创建 PENDING 任务，直接落库状态转移日志
+        db.add(WorkflowStatusLog(
+            instance_id=2, task_id=None, operator_id=None, action="AUTO_REJECT",
+            comment="检出一票否决高危违规项（不可覆盖），优先于完整度直接驳回: 跨单重复发票报销。"
         ))
 
         # -------------------------------------------------------------
-        # 场景 3: 餐饮发票连号异常单 (连号发票集中报销) -> R10
+        # 场景 3: 外部核验服务超时降级 -> DEGRADED -> MANUAL_REVIEW
         # -------------------------------------------------------------
         doc3 = FinancialDocument(
-            id=3, document_no="EXP-20260314-SEQ003", document_type="EXPENSE_REIMBURSEMENT",
-            title="部门团建与办公物资集中采购 (触发 R10 连号发票风控)",
+            id=3, document_no="EXP-20260314-DEGR003", document_type="EXPENSE_REIMBURSEMENT",
+            title="外地会务技术运维技术服务费 (场景C: 供应商画像核验降级 DEGRADED -> MANUAL_REVIEW 人工复核)",
             applicant_id=5, department_name="市场营销部",
             total_amount=Decimal("2400.00"), currency="CNY", status="PENDING_APPROVAL",
             current_version=1, submission_time=now - timedelta(hours=8)
@@ -298,31 +354,21 @@ async def seed():
         db.add(doc3)
         await db.flush()
         db.add(DocumentLineItem(
-            document_id=3, line_no=1, expense_type="餐饮费", item_desc="部门业务招待发票1",
-            amount=Decimal("1200.00"), city_name="北京"
+            document_id=3, line_no=1, expense_type="技术服务费", item_desc="云会议支持服务",
+            amount=Decimal("2400.00"), city_name="北京"
         ))
-        db.add(DocumentLineItem(
-            document_id=3, line_no=2, expense_type="餐饮费", item_desc="部门业务招待发票2",
-            amount=Decimal("1200.00"), city_name="北京"
-        ))
-        # 记录发票附件
-        att3_1 = DocumentAttachment(
-            document_id=3, file_name="餐饮消费电子发票_88203001.png", file_type="PNG",
+        att3 = DocumentAttachment(
+            document_id=3, file_name="技术服务费普通发票.png", file_type="PNG",
             file_path="/uploads/invoices/inv_aa7910dfa882.png", file_hash="hash_88203001",
             file_size_bytes=28925, is_invoice=True, ocr_status="SUCCESS"
         )
-        att3_2 = DocumentAttachment(
-            document_id=3, file_name="餐饮消费电子发票_88203002.png", file_type="PNG",
-            file_path="/uploads/invoices/inv_2512924c3749.png", file_hash="hash_88203002",
-            file_size_bytes=5079, is_invoice=True, ocr_status="SUCCESS"
-        )
-        db.add_all([att3_1, att3_2])
+        db.add(att3)
         await db.flush()
 
         db.add(InvoiceRecord(
-            document_id=3, attachment_id=att3_1.id, invoice_code="011002000222", invoice_number="88203001",
-            invoice_type="增值税电子普通发票", total_amount=Decimal("1200.00"), untaxed_amount=Decimal("1132.08"), tax_amount=Decimal("67.92"),
-            seller_tax_id="91110108551385082Q", seller_name="北京餐饮服务中心", issue_date="2026-03-10",
+            document_id=3, attachment_id=att3.id, invoice_code="011002000222", invoice_number="88203001",
+            invoice_type="增值税电子普通发票", total_amount=Decimal("2400.00"), untaxed_amount=Decimal("2264.15"), tax_amount=Decimal("135.85"),
+            seller_tax_id="91110108MA01TEST99", seller_name="北京创新网络技术服务工作室", issue_date="2026-03-10",
             invoice_hash="sha256_011002000222_88203001",
             raw_payload={
                 "bbox_positions": {
@@ -333,67 +379,72 @@ async def seed():
                 "file_path": "/uploads/invoices/inv_aa7910dfa882.png"
             }
         ))
-        db.add(InvoiceRecord(
-            document_id=3, attachment_id=att3_2.id, invoice_code="011002000222", invoice_number="88203002", # 连号！
-            invoice_type="增值税电子普通发票", total_amount=Decimal("1200.00"), untaxed_amount=Decimal("1132.08"), tax_amount=Decimal("67.92"),
-            seller_tax_id="91110108551385082Q", seller_name="北京餐饮服务中心", issue_date="2026-03-10",
-            invoice_hash="sha256_011002000222_88203002",
-            raw_payload={
-                "bbox_positions": {
-                    "invoice_number": [70, 680, 120, 950],
-                    "total_amount": [420, 680, 480, 940],
-                    "seller_name": [160, 200, 210, 450]
-                },
-                "file_path": "/uploads/invoices/inv_2512924c3749.png"
-            }
-        ))
         report3 = ReviewReport(
-            id=3, task_id="task_seed_03", document_id=3, overall_risk_level="medium",
-            final_score=75, high_risks_count=0, medium_risks_count=1, low_risks_count=0,
-            summary="智能风控审查完毕：综合评分 75 分。核心违规项：【检出同批次连号发票集中入账嫌疑】申请人在本单内提交了连号发票 [88203001, 88203002]，总额 2,400 元，疑似拆单避审。"
+            id=3, task_id="task_seed_03", document_id=3, overall_risk_level="low",
+            final_score=95, high_risks_count=0, medium_risks_count=0, low_risks_count=0,
+            summary="智能风控审查完毕：基础票面核验优良。但因国家企业信用信息公示系统外部接口调用超时，供应商资质核验发生降级 (DEGRADED)，触发防盲区安全门禁，禁止自动放行，转入人工重点复核。",
+            full_report_payload={
+                "audit_completeness": "DEGRADED",
+                "risk_score": 95,
+                "final_score": 95,
+                "overall_risk_level": "low",
+                "approval_decision": {
+                    "action": "MANUAL_REVIEW",
+                    "target_state": "PENDING_APPROVAL",
+                    "reason": "审核完整度为 [DEGRADED]（存在核验降级或部分要素缺失），禁止自动放行，转入人工重点复核。"
+                },
+                "execution_plan": {
+                    "planned_agents": ["InvoiceOcrAgent", "AmountAgent", "ComplianceAgent", "SupplierAgent"]
+                },
+                "agent_execution_results": {
+                    "InvoiceOcrAgent": {"status": "SUCCESS", "elapsed_ms": 35, "source": "DETERMINISTIC", "reason": "票面信息提取一致"},
+                    "AmountAgent": {"status": "SUCCESS", "elapsed_ms": 19, "source": "DETERMINISTIC", "reason": "金额及税额平衡校验通过"},
+                    "ComplianceAgent": {"status": "SUCCESS", "elapsed_ms": 26, "source": "DETERMINISTIC", "reason": "内控规则初查无违规"},
+                    "SupplierAgent": {"status": "DEGRADED", "elapsed_ms": 150, "source": "DETERMINISTIC", "reason": "外部企业资质查询接口响应超时(>150ms)，供应商经营范围与存续状态未完成全量穿透核验，降级运行"}
+                }
+            }
         )
         db.add(report3)
         await db.flush()
-        db.add(RiskFinding(
-            report_id=3, finding_id="find_seed_03", rule_code="R10_SEQUENTIAL_INVOICES",
-            rule_name="检出同批次连号发票集中入账嫌疑", risk_level="medium", agent_role="AnomalyAgent",
-            title="餐饮发票 [88203001-88203002] 连号开具",
-            description="检测到发票号码 88203001 与 88203002 属于同一销售方且号码连续，总额 2,400 元，疑似规避 2,000 元以上审批门槛。",
-            actual_value={"invoice_numbers": ["88203001", "88203002"]},
-            expected_value={"rule": "正常发票散列"},
-            primary_visual_anchor={"box_2d": [70, 680, 120, 950], "label": "连号发票号码 88203001"},
-            suggestion="核实发票开具真实背景及消费明细水单，核实是否存在化整为零恶意拆单拆分发票行为。"
-        ))
+
         inst3 = ApprovalInstance(
-            id=3, workflow_id=2, document_id=3, status="RUNNING",
+            id=3, workflow_id=2, document_id=3, report_id=3, audit_version=1, status="RUNNING",
             current_node_id=3, start_time=now - timedelta(hours=8)
         )
         db.add(inst3)
         await db.flush()
         db.add(ApprovalTask(
             instance_id=3, node_id=3, assignee_id=2, status="PENDING", # 张经理待办
-            created_at=now - timedelta(hours=8)
+            comment="审核完整度降级 (DEGRADED)，系统转入人工重点复核", created_at=now - timedelta(hours=8)
+        ))
+        db.add(WorkflowStatusLog(
+            instance_id=3, task_id=None, operator_id=None, action="SUBMIT_FOR_REVIEW",
+            comment="审核完整度为 [DEGRADED]（存在核验降级或部分要素缺失），禁止自动放行，转入人工重点复核。"
         ))
 
         # -------------------------------------------------------------
-        # 场景 4: 对公付款失信供应商风险单 (高危红线) -> R12 + R15
+        # 场景 4: 附加演示案例 - ReviewerReflector 差礼津贴免票消歧 -> AUTO_APPROVE
         # -------------------------------------------------------------
         doc4 = FinancialDocument(
-            id=4, document_no="CORP-20260315-RED004", document_type="CORP_PAYMENT",
-            title="对外技术运维服务采购款 (触发 R12/R15 供应商黑名单风控)",
+            id=4, document_no="TRV-20260315-DISAM04", document_type="TRAVEL_REIMBURSEMENT",
+            title="异地出差交通与合规津贴报销 (附加演示: ReviewerReflector 差旅津贴免票自动消歧)",
             applicant_id=5, department_name="市场营销部",
-            total_amount=Decimal("50000.00"), currency="CNY", status="PENDING_APPROVAL",
+            total_amount=Decimal("480.00"), currency="CNY", status="APPROVED",
             current_version=1, submission_time=now - timedelta(hours=4)
         )
         db.add(doc4)
         await db.flush()
         db.add(DocumentLineItem(
-            document_id=4, line_no=1, expense_type="技术服务费", item_desc="云架构运维第一期付款",
-            amount=Decimal("50000.00"), city_name="北京"
+            document_id=4, line_no=1, expense_type="交通费", item_desc="高铁二等座车票",
+            amount=Decimal("380.00"), city_name="天津"
+        ))
+        db.add(DocumentLineItem(
+            document_id=4, line_no=2, expense_type="出差津贴", item_desc="1天出差市内包干津贴 (免发票)",
+            amount=Decimal("100.00"), city_name="天津"
         ))
 
         att4 = DocumentAttachment(
-            document_id=4, file_name="云架构运维技术服务专票.jpg", file_type="JPG",
+            document_id=4, file_name="高铁车票报销凭证.jpg", file_type="JPG",
             file_path="/uploads/invoices/inv_d70ddfc1e7a2.jpg", file_hash="hash_seed_04",
             file_size_bytes=1289752, is_invoice=True, ocr_status="SUCCESS"
         )
@@ -401,59 +452,70 @@ async def seed():
         await db.flush()
 
         db.add(InvoiceRecord(
-            document_id=4, attachment_id=att4.id, invoice_code="011002000999", invoice_number="99001234",
-            invoice_type="增值税专用发票", total_amount=Decimal("50000.00"), untaxed_amount=Decimal("47169.81"),
-            tax_amount=Decimal("2830.19"), tax_rate=Decimal("0.0600"),
-            seller_name="北京星火虚开供应链管理有限公司", seller_tax_id="91110108MA01TEST99",
+            document_id=4, attachment_id=att4.id, invoice_code="031001900888", invoice_number="88001234",
+            invoice_type="铁路电子客票", total_amount=Decimal("380.00"), untaxed_amount=Decimal("348.62"),
+            tax_amount=Decimal("31.38"), tax_rate=Decimal("0.0900"),
+            seller_name="中国铁路北京局集团有限公司", seller_tax_id="911100001322000000",
             buyer_name="北京智能前沿科技有限公司", buyer_tax_id="91110108MA01XXXXXX",
-            issue_date="2026-03-08", invoice_hash="sha256_seed_04",
+            issue_date="2026-03-12", invoice_hash="sha256_seed_04",
             raw_payload={
                 "bbox_positions": {
                     "total_amount": [420, 680, 480, 940],
-                    "invoice_number": [70, 680, 120, 950],
-                    "seller_name": [180, 520, 230, 950],
-                    "seller_tax_id": [220, 520, 270, 950]
+                    "invoice_number": [70, 680, 120, 950]
                 },
                 "file_path": "/uploads/invoices/inv_d70ddfc1e7a2.jpg"
             }
         ))
 
         report4 = ReviewReport(
-            id=4, task_id="task_seed_04", document_id=4, overall_risk_level="high",
-            final_score=35, high_risks_count=2, medium_risks_count=0, low_risks_count=0,
-            summary="🚨 触犯企业高危风控红线：收款供应商【北京星火虚开供应链管理有限公司】已被最高人民法院列入失信被执行人名单，且实缴注册资本仅5万元存在空壳公司嫌疑！审批人若特批放行必须填写具名 override_reason！"
+            id=4, task_id="task_seed_04", document_id=4, overall_risk_level="low",
+            final_score=100, high_risks_count=0, medium_risks_count=0, low_risks_count=0,
+            summary="智能风控审查完毕：综合评分 100 分。经终审门禁反思 (ReviewerReflector)，单据申报 480 元与发票 380 元的 100 元差额确认为合规免票差旅包干津贴 (allowance_policy_verified=True)，系统已自动消除 R02 异常，全项合规放行。",
+            full_report_payload={
+                "audit_completeness": "COMPLETE",
+                "risk_score": 100,
+                "final_score": 100,
+                "overall_risk_level": "low",
+                "approval_decision": {
+                    "action": "AUTO_APPROVE",
+                    "target_state": "APPROVED",
+                    "reason": "经终审反思门禁核验，差额确认为合规免票差旅津贴，消歧后全项放行。"
+                },
+                "execution_plan": {
+                    "planned_agents": ["InvoiceOcrAgent", "AmountAgent", "ComplianceAgent", "ReviewerReflector"]
+                },
+                "agent_execution_results": {
+                    "InvoiceOcrAgent": {"status": "SUCCESS", "elapsed_ms": 30, "source": "DETERMINISTIC", "reason": "铁路客票核验无误"},
+                    "AmountAgent": {"status": "SUCCESS", "elapsed_ms": 22, "source": "DETERMINISTIC", "reason": "初步检出发票金额 380 与申报 480 存在 100 元偏差"},
+                    "ReviewerReflector": {"status": "SUCCESS", "elapsed_ms": 65, "source": "DETERMINISTIC", "reason": "检索到《企业差旅管理标准》第3.4条包干津贴条款 (100元/天*1天)，确认 allowance_policy_verified=True，执行自动消歧核减"}
+                },
+                "disambiguation_logs": [
+                    {
+                        "rule_code": "R02_AMOUNT_MISMATCH",
+                        "action": "自动消歧",
+                        "reason": "发票金额 380.00 元与单据总额 480.00 元之差额 100.00 元，已成功匹配制度库差旅包干津贴标准（每天100元*1天，allowance_policy_verified=True），免票条款依据确凿，原金额不一致风险已自动解除并核减。"
+                    }
+                ]
+            }
         )
         db.add(report4)
         await db.flush()
-        db.add(RiskFinding(
-            report_id=4, finding_id="find_seed_04_a", rule_code="R12_DISHONEST_DEBTOR",
-            rule_name="交易供应商为失信被执行人", risk_level="high", agent_role="SupplierAgent",
-            title="供应商 [北京星火虚开供应链管理有限公司] 属于失信被执行人",
-            description="统一社会信用代码 91110108MA01TEST99 在全国失信惩戒数据库命中，涉及司法执行标的金额逾千万元。",
-            actual_value={"is_dishonest_debtor": True, "dishonest_record_count": 3},
-            expected_value={"is_dishonest_debtor": False},
-            primary_visual_anchor={"box_2d": [220, 520, 270, 950], "label": "供应商纳税人识别号 (失信被执行人)"},
-            suggestion="立即中止付款，启动法务与供应商合规背调程序。"
-        ))
-        db.add(RiskFinding(
-            report_id=4, finding_id="find_seed_04_b", rule_code="R15_SHELL_COMPANY_SUSPICION",
-            rule_name="疑似空壳走账公司与资金外流风险", risk_level="high", agent_role="SupplierAgent",
-            title="注册资本仅 5 万元且税务被列入非正常户",
-            description="该供应商注册资本仅 50,000 元，参保人数为 0 人，纳税信用等级为 D 级且处于税务非正常户走逃状态。",
-            actual_value={"registered_capital": 50000, "is_abnormal_taxpayer": True},
-            expected_value={"min_capital": 1000000},
-            primary_visual_anchor={"box_2d": [180, 520, 230, 950], "label": "供应商名称 (疑似空壳主体)"},
-            suggestion="财务严控放款，严禁通过失信空壳主体洗钱或套取资金。"
-        ))
+
         inst4 = ApprovalInstance(
-            id=4, workflow_id=3, document_id=4, status="RUNNING",
-            current_node_id=7, start_time=now - timedelta(hours=4)
+            id=4, workflow_id=1, document_id=4, report_id=4, audit_version=1, status="COMPLETED",
+            start_time=now - timedelta(hours=4), end_time=now - timedelta(hours=4)
         )
         db.add(inst4)
         await db.flush()
-        db.add(ApprovalTask(
-            instance_id=4, node_id=7, assignee_id=4, status="PENDING", # 王总监/CFO 特批待办
-            created_at=now - timedelta(hours=4)
+        auto_task4 = ApprovalTask(
+            instance_id=4, node_id=2, assignee_id=None, status="AUTO_PASSED",
+            comment="终审反思消歧通过，系统自动放行", created_at=now - timedelta(hours=4), end_time=now - timedelta(hours=4)
+        )
+        db.add(auto_task4)
+        await db.flush()
+        db.add(WorkflowStatusLog(
+            instance_id=4, task_id=auto_task4.id, operator_id=None, action="AUTO_PASS",
+            comment="经终审反思门禁核验，差额确认为合规免票差旅津贴，消歧后全项放行。"
         ))
 
         # -------------------------------------------------------------

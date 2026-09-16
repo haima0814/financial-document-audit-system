@@ -1,4 +1,4 @@
-﻿# 财务单据智能风险审核系统 (Intelligent Financial Document Risk Audit System)
+# 财务单据智能风险审核系统 (Intelligent Financial Document Risk Audit System)
 
 > 企业级多智能体协同（Multi-Agent）与确定性规则引擎双重驱动的财务合规与风控审计平台。  
 > 遵循 **“算归算，想归想 (Deterministic Computation + LLM Reasoning)”** 与 **“Fail-Safe 兜底降级门禁”** 原则。
@@ -92,12 +92,46 @@ npm run dev
 ```
 - 前端访问地址：`http://localhost:5173`
 
-### 3. 运行自动化测试回归
+### 3. 一键预置 Demo 场景数据与全链路回放
+
+系统内置了 3 大核心业务闭环场景及 1 项终审反思消歧案例，可通过脚本直接一键重放与断言校验：
+
+```bash
+cd backend
+# 1. 预置全量数据库与场景单据
+python scripts/seed_data.py
+
+# 2. 自动化执行端到端回放校验
+python scripts/replay_demos.py
+```
+
+### 4. 运行全量自动化测试套件
 
 ```bash
 cd backend
 pytest -v
 ```
+> 目前全量通过 **139/139** 项单元测试与数据库状态机集成测试。
+
+---
+
+## 🎯 3 大核心演示场景说明 (Minimum Viable Closed Loop)
+
+登录系统（默认密码统一为 `123456`）：
+* 经办员工：`emp` (小赵)
+* 部门主管：`manager` (张经理)
+* 财务专员：`finance` (李财务)
+* 财务总监：`cfo` (王总监)
+* 管理员：`admin` (系统管理员)
+
+| 场景编号 | 场景名称与单据 | 风险特征与完整度 | 审批状态机最终裁决 | 业务后果与界面效果 |
+| :--- | :--- | :--- | :---: | :--- |
+| **场景 A** | **正常小额市内打车费**<br>`EXP-20260312-PASS01` (¥320.00) | `COMPLETE`<br>`LOW` (评分 100) | **`AUTO_APPROVE`**<br>(系统自动放行) | 单据直接置为 `APPROVED`，生成系统免审任务，无需人工介入。 |
+| **场景 B** | **跨单重复报销发票**<br>`EXP-20260313-VETO02` (¥850.00) | `COMPLETE`<br>`HIGH` (R08不可覆盖) | **`REJECT`**<br>(一票否决驳回) | 优先于完整度直接一票否决，单据置为 `REJECTED`，工作流终止，**不创建任何普通待办**。 |
+| **场景 C** | **会务技术运维服务款**<br>`EXP-20260314-DEGR003` (¥2400.00) | `DEGRADED`<br>`LOW` (评分 95) | **`MANUAL_REVIEW`**<br>(转人工重点复核) | 外部接口超时导致核验降级，严禁自动放行，单据进入 `PENDING_APPROVAL`，转主管与财务人工复核。 |
+| **场景 D**<br>*(附加)* | **差旅交通与包干津贴**<br>`TRV-20260315-DISAM04` (¥480.00) | `COMPLETE`<br>门禁反思消歧 | **`AUTO_APPROVE`**<br>(消歧后自动放行) | 存在 100 元发票差额，ReviewerReflector 匹配差旅包干津贴制度证据后自动消歧核减，最终放行。 |
+
+> 💡 **现场动态演示建议**：切换至 `emp` 账号，进入「单据管理」，找到草稿单 `EXP-20260316-DFT005`，点击「提交审查」，可直观感受 **SSE 实时流式时间线抽屉** 与 **智能风控体检报告工作台** 的端到端交互。
 
 ---
 
@@ -110,3 +144,4 @@ pytest -v
 
 ## 📄 License
 [MIT License](LICENSE)
+

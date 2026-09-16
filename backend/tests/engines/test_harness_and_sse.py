@@ -125,7 +125,12 @@ async def test_event_bus_and_sse_pipeline():
         )
         await event_bus.publish(finish_envelope)
 
-        response = await client.get(f"/api/v1/audits/events/{task_id}")
+        from app.services.auth_service import AuthService
+        token = AuthService.create_access_token(user_id=1, username="admin", roles=["ADMIN"])
+        response = await client.get(
+            f"/api/v1/audits/events/{task_id}",
+            headers={"Authorization": f"Bearer {token}"}
+        )
         assert response.status_code == 200
         assert "text/event-stream" in response.headers.get("content-type", "")
         content = response.text

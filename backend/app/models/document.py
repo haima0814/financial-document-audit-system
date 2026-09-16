@@ -24,7 +24,7 @@ class FinancialDocument(Base):
     total_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal("0.00"))
     currency: Mapped[str] = mapped_column(String(8), default="CNY")
     
-    # 宏观状态: DRAFT, SUBMITTED, IN_REVIEW, PENDING_APPROVAL, APPROVED, REJECTED, CANCELLED
+    # 宏观状态: DRAFT, SUBMITTED, IN_REVIEW, PENDING_APPROVAL, APPROVED, REJECTED, NEED_SUPPLEMENT, CANCELLED
     status: Mapped[str] = mapped_column(String(32), default="DRAFT", index=True)
     
     # 版本快照与并发乐观锁

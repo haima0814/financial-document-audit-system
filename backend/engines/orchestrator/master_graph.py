@@ -529,6 +529,24 @@ class MasterOrchestrator:
 
         state.findings = collected_findings
 
+        # 广播各专业智能体节点的独立执行结果与耗时 (供 SSE 时间轴精确渲染)
+        for r in all_results:
+            await StreamProducer.publish_event(
+                task_id=state.task_id,
+                document_id=state.document_id,
+                event_type=EventTypeEnum.NODE_STATUS,
+                payload={
+                    "role": r.role,
+                    "status": r.status.value,
+                    "message": f"{r.role.value} 审查完成 ({r.status.value})",
+                    "duration_ms": r.duration_ms,
+                    "elapsed_ms": r.duration_ms,
+                    "findings_count": len(r.findings),
+                    "reason": r.reason,
+                    "capabilities_run": [c.value if hasattr(c, "value") else str(c) for c in (r.capabilities_run or [])]
+                }
+            )
+
         await StreamProducer.publish_event(
             task_id=state.task_id,
             document_id=state.document_id,

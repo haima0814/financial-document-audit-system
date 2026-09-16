@@ -59,7 +59,7 @@
       <div class="kpi-card kpi-emerald">
         <div class="kpi-info">
           <span class="kpi-label">AI 智能初审放行率</span>
-          <h3 class="kpi-value text-emerald">{{ metrics.overview?.auto_pass_rate || 92.5 }}%</h3>
+          <h3 class="kpi-value text-emerald">{{ metrics.overview?.auto_pass_rate ?? 0 }}%</h3>
           <span class="kpi-footer">低危小额单据 RULE_AUTO_PASS</span>
         </div>
         <div class="kpi-icon-wrapper">
@@ -75,14 +75,14 @@
         <template #header>
           <div class="card-header-flex">
             <span class="card-title">🛡️ 单据风险等级分布与综合评级</span>
-            <el-tag size="small" type="primary">平均得分: {{ metrics.overview?.avg_score || 91.5 }} 分</el-tag>
+            <el-tag size="small" type="primary">平均得分: {{ metrics.overview?.avg_score ?? 100 }} 分</el-tag>
           </div>
         </template>
 
         <div class="risk-dist-body">
           <div class="risk-score-badge">
             <div class="score-circle">
-              <span class="score-num">{{ Math.round(metrics.overview?.avg_score || 91) }}</span>
+              <span class="score-num">{{ Math.round(metrics.overview?.avg_score ?? 100) }}</span>
               <span class="score-text">综合风控评级</span>
             </div>
             <div class="score-desc">

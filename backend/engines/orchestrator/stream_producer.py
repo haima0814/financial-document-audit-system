@@ -36,14 +36,54 @@ class StreamProducer:
         task_id: str,
         document_id: int,
         event_type: EventTypeEnum,
-        payload: Dict[str, Any]
+        payload: Any
     ) -> BaseEventEnvelope:
-        """分发标准化审计事件并入列暂存"""
+        """分发标准化审计事件并入列暂存 (支持 Pydantic Payload DTO 与 dict 强校验规范化)"""
+        from pydantic import BaseModel
+        from engines.contract.events import EVENT_PAYLOAD_SCHEMA_MAP
+
+        if isinstance(payload, BaseModel):
+            data_dict = payload.model_dump(mode="json")
+        elif isinstance(payload, dict):
+            # 兼容历史与现有调用中的字段命名漂移
+            p_copy = dict(payload)
+            if "stage" in p_copy and "current_stage" not in p_copy:
+                p_copy["current_stage"] = p_copy["stage"]
+            if "current_stage" in p_copy and "stage" not in p_copy:
+                p_copy["stage"] = p_copy["current_stage"]
+            if "high_count" in p_copy and "high_risks_count" not in p_copy:
+                p_copy["high_risks_count"] = p_copy["high_count"]
+            if "high_risks_count" in p_copy and "high_count" not in p_copy:
+                p_copy["high_count"] = p_copy["high_risks_count"]
+            if "medium_count" in p_copy and "medium_risks_count" not in p_copy:
+                p_copy["medium_risks_count"] = p_copy["medium_count"]
+            if "medium_risks_count" in p_copy and "medium_count" not in p_copy:
+                p_copy["medium_count"] = p_copy["medium_risks_count"]
+            if "low_count" in p_copy and "low_risks_count" not in p_copy:
+                p_copy["low_risks_count"] = p_copy["low_count"]
+            if "low_risks_count" in p_copy and "low_count" not in p_copy:
+                p_copy["low_count"] = p_copy["low_risks_count"]
+            if "elapsed_ms" in p_copy and "duration_ms" not in p_copy:
+                p_copy["duration_ms"] = p_copy["elapsed_ms"]
+            if "duration_ms" in p_copy and "elapsed_ms" not in p_copy:
+                p_copy["elapsed_ms"] = p_copy["duration_ms"]
+            if "overall_risk_level" in p_copy and hasattr(p_copy["overall_risk_level"], "value"):
+                p_copy["overall_risk_level"] = p_copy["overall_risk_level"].value
+
+            schema_cls = EVENT_PAYLOAD_SCHEMA_MAP.get(event_type)
+            if schema_cls:
+                dto = schema_cls.model_validate(p_copy)
+                data_dict = dto.model_dump(mode="json")
+            else:
+                data_dict = p_copy
+        else:
+            data_dict = dict(payload)
+
         envelope = BaseEventEnvelope(
             event=event_type,
             task_id=task_id,
             document_id=document_id,
-            data=payload
+            data=data_dict
         )
 
         # 1. 存入内存事件队列

@@ -334,15 +334,15 @@ class DocumentService:
             raise DocumentNotFoundError(f"单据[ID:{document_id}]不存在！")
         if doc.applicant_id != user_id:
             raise PermissionError("只有单据经办人本人才能提交审批！")
-        if doc.status not in ["DRAFT", "REJECTED"]:
+        if doc.status not in ["DRAFT", "REJECTED", "NEED_SUPPLEMENT"]:
             raise DocumentStateConflictError(f"单据当前状态为 [{doc.status}]，不可重复提交！")
 
         from_status = doc.status
         doc.status = "SUBMITTED"
         doc.submission_time = datetime.now(timezone.utc)
 
-        # 若是驳回后重新提交，自动递增版本号并保存 V2+ 快照
-        if from_status == "REJECTED":
+        # 若是驳回或待补充材料后重新提交，自动递增版本号并保存 V2+ 快照
+        if from_status in ["REJECTED", "NEED_SUPPLEMENT"]:
             doc.current_version += 1
             doc.version_lock += 1
 
@@ -358,18 +358,23 @@ class DocumentService:
                     for i in curr_lines
                 ],
             }
+            summary_prefix = "补充材料后重新提交审批" if from_status == "NEED_SUPPLEMENT" else "驳回后修改重新提交审批"
             new_version = DocumentVersion(
                 document_id=doc.id,
                 version_no=doc.current_version,
                 trigger_action="RESUBMIT",
                 snapshot_payload=snapshot_payload,
-                change_summary=f"驳回后修改重新提交审批(第{doc.current_version}版)",
+                change_summary=f"{summary_prefix}(第{doc.current_version}版)",
                 created_by=user_id,
             )
             self.db.add(new_version)
 
         # 记录状态流转日志
-        comment_str = f"经办人重新提交审批(升级为V{doc.current_version})" if from_status == "REJECTED" else "经办人提交单据审批"
+        if from_status in ["REJECTED", "NEED_SUPPLEMENT"]:
+            comment_str = f"经办人重新提交审批(升级为V{doc.current_version})"
+        else:
+            comment_str = "经办人提交单据审批"
+
         status_log = DocumentStatusLog(
             document_id=doc.id,
             from_status=from_status,

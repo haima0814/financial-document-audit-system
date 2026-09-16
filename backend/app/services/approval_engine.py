@@ -189,66 +189,121 @@ class ApprovalEngine:
         # 2. 状态转移业务后果裁决
         decision = await ApprovalEngine.evaluate_transition(doc, report)
 
-        # 3. 创建审批实例
+        # 3. 创建审批实例 (关联 report_id 与 audit_version)
         instance = ApprovalInstance(
             workflow_id=workflow_id,
             document_id=document_id,
+            report_id=report_id,
+            audit_version=doc.current_version if doc else 1,
             status="RUNNING",
             start_time=datetime.now(timezone.utc)
         )
         db.add(instance)
         await db.flush()
 
-        # 4. 执行状态机裁决分支
+        # 挂载 approval_decision 至 report.full_report_payload 便于前后端与审计追溯
+        if report and report.full_report_payload is not None and isinstance(report.full_report_payload, dict):
+            payload_copy = dict(report.full_report_payload)
+            payload_copy["approval_decision"] = decision.model_dump(mode="json")
+            report.full_report_payload = payload_copy
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(report, "full_report_payload")
+            await db.flush()
+
+        # 4. 执行状态机裁决分支 (四种业务后果落地闭环)
         if decision.action == ApprovalDecisionAction.AUTO_APPROVE:
             instance.status = "COMPLETED"
             instance.end_time = datetime.now(timezone.utc)
-            doc.status = decision.target_state # "APPROVED"
+            doc.status = "APPROVED"
 
-            # 记录免审直通任务与日志
             first_node = await ApprovalEngine._get_node_by_order(db, workflow_id, 1)
             auto_task = ApprovalTask(
                 instance_id=instance.id,
                 node_id=first_node.id if first_node else 1,
-                assignee_id=0, # 系统自动
+                assignee_id=None, # 允许 NULL，彻底杜绝外键约束冲突 (PostgreSQL 严密兼容)
                 status="AUTO_PASSED",
-                comment="单据金额 <= 500元且AI审查评定为低危，触发小额免审规则直通放行。",
+                comment=decision.reason,
                 created_at=datetime.now(timezone.utc),
                 end_time=datetime.now(timezone.utc)
             )
             db.add(auto_task)
+            await db.flush()
 
             log = WorkflowStatusLog(
                 instance_id=instance.id,
                 task_id=auto_task.id,
-                operator_id=0, # 系统自动处理
+                operator_id=None, # None 表示系统自动处理
                 action="AUTO_PASS",
-                comment="单据金额 <= 500元且AI审查评定为低危，触发小额免审规则直通放行。"
+                comment=decision.reason
             )
             db.add(log)
             await db.flush()
             return instance
 
-        # 4. 常规/高危流程：创建首节点待办任务 (从 node_order=1 开始)
-        first_node = await ApprovalEngine._get_node_by_order(db, workflow_id, 1)
-        if not first_node:
-            raise ValueError(f"工作流 [{workflow_id}] 未配置任何有效节点！")
+        elif decision.action == ApprovalDecisionAction.REJECT:
+            instance.status = "TERMINATED"
+            instance.end_time = datetime.now(timezone.utc)
+            doc.status = "REJECTED"
 
-        assignee_id = await ApprovalEngine._resolve_assignee(db, doc, first_node)
-        task = ApprovalTask(
-            instance_id=instance.id,
-            node_id=first_node.id,
-            assignee_id=assignee_id,
-            status="PENDING",
-            created_at=datetime.now(timezone.utc)
-        )
-        db.add(task)
+            # 严禁创建普通人工 PENDING 审批任务，仅记录系统自动驳回审计日志
+            log = WorkflowStatusLog(
+                instance_id=instance.id,
+                task_id=None,
+                operator_id=None, # None 表示系统自动处理
+                action="AUTO_REJECT",
+                comment=decision.reason
+            )
+            db.add(log)
+            await db.flush()
+            return instance
 
-        # 单据进入“待人工审批”状态，记录当前节点
-        instance.current_node_id = first_node.id
-        doc.status = "PENDING_APPROVAL"
-        await db.flush()
-        return instance
+        elif decision.action == ApprovalDecisionAction.NEED_SUPPLEMENT:
+            instance.status = "SUSPENDED"
+            doc.status = "NEED_SUPPLEMENT"
+
+            # 严禁创建普通人工 PENDING 审批任务，单据挂起等待经办人补充材料
+            log = WorkflowStatusLog(
+                instance_id=instance.id,
+                task_id=None,
+                operator_id=None, # None 表示系统自动处理
+                action="NEED_SUPPLEMENT",
+                comment=decision.reason
+            )
+            db.add(log)
+            await db.flush()
+            return instance
+
+        else: # ApprovalDecisionAction.MANUAL_REVIEW
+            instance.status = "RUNNING"
+            doc.status = "PENDING_APPROVAL"
+
+            first_node = await ApprovalEngine._get_node_by_order(db, workflow_id, 1)
+            if not first_node:
+                raise ValueError(f"工作流 [{workflow_id}] 未配置任何有效节点！")
+
+            assignee_id = await ApprovalEngine._resolve_assignee(db, doc, first_node)
+            task = ApprovalTask(
+                instance_id=instance.id,
+                node_id=first_node.id,
+                assignee_id=assignee_id,
+                status="PENDING",
+                comment=f"系统转入人工复核: {decision.reason}",
+                created_at=datetime.now(timezone.utc)
+            )
+            db.add(task)
+            instance.current_node_id = first_node.id
+            await db.flush()
+
+            log = WorkflowStatusLog(
+                instance_id=instance.id,
+                task_id=task.id,
+                operator_id=None, # None 表示系统自动流转
+                action="SUBMIT_FOR_REVIEW",
+                comment=decision.reason
+            )
+            db.add(log)
+            await db.flush()
+            return instance
 
     @staticmethod
     async def execute_action(

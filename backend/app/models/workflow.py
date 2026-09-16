@@ -47,9 +47,11 @@ class ApprovalInstance(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     workflow_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_workflows.id"), nullable=False)
-    document_id: Mapped[int] = mapped_column(Integer, ForeignKey("financial_documents.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    document_id: Mapped[int] = mapped_column(Integer, ForeignKey("financial_documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    report_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("review_reports.id", ondelete="SET NULL"), nullable=True, index=True)
+    audit_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     
-    # 状态: RUNNING, COMPLETED, TERMINATED, CANCELLED
+    # 状态: RUNNING, COMPLETED, TERMINATED, SUSPENDED, CANCELLED
     status: Mapped[str] = mapped_column(String(32), default="RUNNING", index=True)
     current_node_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     
@@ -65,7 +67,7 @@ class ApprovalTask(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     instance_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_instances.id", ondelete="CASCADE"), nullable=False, index=True)
     node_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_workflow_nodes.id"), nullable=False)
-    assignee_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    assignee_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     
     # 状态: PENDING, APPROVED, REJECTED, TRANSFERRED, ADD_SIGN, AUTO_PASSED
     status: Mapped[str] = mapped_column(String(32), default="PENDING", index=True)
@@ -78,7 +80,7 @@ class ApprovalTask(Base):
     end_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     instance: Mapped["ApprovalInstance"] = relationship("ApprovalInstance", back_populates="tasks")
-    assignee: Mapped["User"] = relationship("User", foreign_keys=[assignee_id])
+    assignee: Mapped[Optional["User"]] = relationship("User", foreign_keys=[assignee_id])
     node: Mapped["ApprovalWorkflowNode"] = relationship("ApprovalWorkflowNode", foreign_keys=[node_id])
 
 class WorkflowStatusLog(Base):
@@ -88,8 +90,8 @@ class WorkflowStatusLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     instance_id: Mapped[int] = mapped_column(Integer, ForeignKey("approval_instances.id", ondelete="CASCADE"), nullable=False, index=True)
     task_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    operator_id: Mapped[int] = mapped_column(Integer, nullable=False) # 0为系统自动处理
-    action: Mapped[str] = mapped_column(String(32), nullable=False) # SUBMIT, APPROVE, REJECT, TRANSFER, ADD_SIGN, AUTO_PASS, REVOKE
+    operator_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True) # None 或 0 为系统自动处理
+    action: Mapped[str] = mapped_column(String(32), nullable=False) # SUBMIT, APPROVE, REJECT, TRANSFER, ADD_SIGN, AUTO_PASS, AUTO_REJECT, NEED_SUPPLEMENT, REVOKE
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     extra_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(CompatibleJSONB, default=dict) # 记录 override_reason, target_user_id 等
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))

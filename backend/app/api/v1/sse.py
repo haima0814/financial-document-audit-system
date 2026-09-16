@@ -7,9 +7,16 @@ import asyncio
 import json
 import logging
 from typing import Optional
-from fastapi import APIRouter, Request, Header
+from fastapi import APIRouter, Request, Header, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
+from app.core.database import get_db
+from app.schemas.auth import TokenPayload
+from app.services.auth_service import get_current_user
+from app.models.audit import AnalysisTask
+from app.models.document import FinancialDocument
 from engines.contract.event_bus import event_bus
 from engines.contract.events import BaseEventEnvelope
 
@@ -20,8 +27,23 @@ logger = logging.getLogger("api.sse")
 async def audit_events_sse(
     task_id: str,
     request: Request,
-    last_event_id: Optional[str] = Header(None, alias="Last-Event-ID")
+    last_event_id: Optional[str] = Header(None, alias="Last-Event-ID"),
+    current_user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
+    # 鉴权与租户数据安全校验
+    is_privileged = any(r in (current_user.roles or []) for r in ["ADMIN", "MANAGER", "FINANCE", "CFO"])
+    task_stmt = select(AnalysisTask).where(AnalysisTask.task_id == task_id)
+    task_obj = (await db.execute(task_stmt)).scalars().first()
+
+    if task_obj:
+        doc = await db.get(FinancialDocument, task_obj.document_id)
+        if doc and doc.applicant_id != current_user.user_id and not is_privileged:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问该单据的实时审查事件流")
+    else:
+        # 若数据库尚未落库，但内存事件总线存在历史或用户具备管理权限，则允许推流；否则 404
+        if not (is_privileged or event_bus.get_history(task_id)):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="指定审查任务不存在")
     """
     客户端建立 SSE 长连接以实时监听指定任务的流水线演进状态：
     - Stage 1: TASK_STARTED

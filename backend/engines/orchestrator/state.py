@@ -64,7 +64,22 @@ class MasterAuditState(BaseModel):
             disambiguation_logs=self.disambiguation_logs,
             agent_execution_results=self.agent_results,
             execution_plan=self.execution_plan.model_dump(mode="json") if self.execution_plan else None,
-            full_report_payload={"findings": [f.model_dump(mode="json") for f in self.verified_findings]},
+            full_report_payload={
+                "audit_completeness": self.audit_completeness,
+                "risk_score": self.risk_score,
+                "final_score": self.final_score,
+                "overall_risk_level": self.overall_risk_level,
+                "execution_elapsed_ms": elapsed_ms,
+                "execution_plan": self.execution_plan.model_dump(mode="json") if self.execution_plan else None,
+                "agent_execution_results": [r.model_dump(mode="json") if hasattr(r, "model_dump") else r for r in self.agent_results],
+                "disambiguation_logs": [d.model_dump(mode="json") if hasattr(d, "model_dump") else d for d in self.disambiguation_logs],
+                "verified_findings": [f.model_dump(mode="json") if hasattr(f, "model_dump") else f for f in self.verified_findings],
+                "raw_findings": [f.model_dump(mode="json") if hasattr(f, "model_dump") else f for f in self.findings],
+                "findings": [f.model_dump(mode="json") if hasattr(f, "model_dump") else f for f in self.verified_findings],
+                "task_id": self.task_id,
+                "document_id": self.document_id,
+                "completed_at": comp_at.isoformat() if comp_at else None
+            },
             completed_at=comp_at,
             execution_elapsed_ms=elapsed_ms
         )
