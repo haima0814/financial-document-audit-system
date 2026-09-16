@@ -282,7 +282,9 @@ const handleEventMessage = (eventName, dataStr) => {
 
       if (stage === 'STAGE_1_PLAN_GENERATED') {
         stageTitle = 'Stage 1: 动态审查规划生成完毕'
-        stageContent = `已根据单据要素与风险画像规划核验节点 (${payload.tasks_count || 0} 个任务)`
+        const tasksCount = payload.planned_tasks ? payload.planned_tasks.length : 0
+        const capsText = payload.total_capabilities != null ? `，含 ${payload.total_capabilities} 项能力` : ''
+        stageContent = `已根据单据要素与风险画像规划核验节点 (${tasksCount} 个任务${capsText})`
         stageTag = 'STAGE_1'
       } else if (stage === 'STAGE_2_PARALLEL_DONE') {
         stageTitle = 'Stage 2: 多智能体并行核查完成'
@@ -290,7 +292,7 @@ const handleEventMessage = (eventName, dataStr) => {
         stageTag = 'STAGE_2'
       } else if (stage === 'STAGE_3_REVIEW_DONE') {
         stageTitle = 'Stage 3: 终审门禁复核完成'
-        stageContent = `复核确认有效风险项 ${payload.verified_count ?? count} 条`
+        stageContent = `终审质检与反思确认完成，最终有效风险项 ${payload.verified_count ?? count} 条`
         stageTag = 'STAGE_3'
       } else if (stage === 'STAGE_4_EVALUATED') {
         stageTitle = 'Stage 4: 风险评级与决策就绪'
@@ -307,17 +309,17 @@ const handleEventMessage = (eventName, dataStr) => {
       })
     } else if (ev === 'review_reflect') {
       progress.value = Math.max(progress.value, 85)
-      const applied = payload.reflection_applied
-      const verified = payload.verified_count ?? 0
+      const disambiguatedCount = payload.disambiguated_count ?? (payload.reflection_logs ? payload.reflection_logs.length : 0)
+      const hasDisambiguation = disambiguatedCount > 0
 
       eventTimeline.value.push({
         timestamp: timeStr,
         tag: 'STAGE_3',
         title: 'Stage 3: 终审门禁反思消歧 (ReviewerReflector)',
-        content: applied
-          ? `已执行反思消歧，最终确认有效风险项 ${verified} 条`
+        content: hasDisambiguation
+          ? `已执行反思消歧，自动核减/修正 ${disambiguatedCount} 项`
           : '终审门禁复核通过，未触发消歧',
-        type: applied ? 'warning' : 'success'
+        type: hasDisambiguation ? 'warning' : 'success'
       })
     } else if (ev === 'task_completed') {
       progress.value = 100

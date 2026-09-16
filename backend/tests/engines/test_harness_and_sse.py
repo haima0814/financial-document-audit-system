@@ -254,3 +254,37 @@ async def test_agent_harness_degraded_status_and_audit_completeness():
     assert result_dto.audit_completeness == "DEGRADED"
     assert state.audit_completeness == "DEGRADED"
 
+
+@pytest.mark.asyncio
+async def test_sse_review_reflect_and_plan_payloads():
+    """测试 SSE 协议中 REVIEW_REFLECT 与 STAGE_1_PLAN_GENERATED 契约对齐"""
+    from engines.contract.events import ReviewReflectPayload, TaskProgressPayload
+
+    # 1. 验证 ReviewReflectPayload 结构 (disambiguated_count 与 reflection_logs)
+    reflect_data = {
+        "stage": "STAGE_3_REVIEW_REFLECT",
+        "disambiguated_count": 2,
+        "reflection_logs": [
+            {"rule_code": "R02_ALLOWANCE_DISAMBIGUATION", "action": "AUTO_RESOLVED_FULL", "reason": "符合差旅津贴免票政策"}
+        ]
+    }
+    reflect_payload = ReviewReflectPayload.model_validate(reflect_data)
+    assert reflect_payload.disambiguated_count == 2
+    assert len(reflect_payload.reflection_logs) == 1
+    assert reflect_payload.stage == "STAGE_3_REVIEW_REFLECT"
+
+    # 2. 验证 STAGE_1_PLAN_GENERATED 结构 (planned_tasks 与 total_capabilities)
+    plan_data = {
+        "stage": "STAGE_1_PLAN_GENERATED",
+        "explanation": "规划 3 个审查节点",
+        "planned_tasks": ["AmountAgent", "PolicyAgent", "AnomalyAgent"],
+        "total_capabilities": 8,
+        "percent": 25
+    }
+    plan_payload = TaskProgressPayload.model_validate(plan_data)
+    assert plan_payload.stage == "STAGE_1_PLAN_GENERATED"
+    assert len(plan_payload.planned_tasks) == 3
+    assert plan_payload.total_capabilities == 8
+    assert plan_payload.percent == 25
+
+

@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 import uuid
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 from .agent_role import AgentRoleEnum
 from .evidence import EvidenceRecord
@@ -28,12 +28,12 @@ class BaseEventEnvelope(BaseModel):
     """WebSocket 统一消息外层信封"""
     model_config = ConfigDict(frozen=True)
     
-    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    event: EventTypeEnum = Field(..., description="事件类型")
-    task_id: str = Field(..., description="所属分析任务 task_id")
-    document_id: int = Field(..., description="单据 ID")
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    data: Dict[str, Any] = Field(default_factory=dict, description="事件具体业务载荷")
+    event_id: str = Field(default_factory=lambda: uuid.uuid4().hex, description="事件唯一ID (幂等防重)")
+    event: EventTypeEnum = Field(..., description="事件类型枚举")
+    task_id: str = Field(..., description="所属分析任务ID")
+    document_id: int = Field(..., description="业务单据ID")
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat(), description="事件产生时间戳")
+    data: Dict[str, Any] = Field(default_factory=dict, description="业务负载明细数据")
 
 # --- 具体的事件业务载荷 DTO (Data Payloads) ---
 
@@ -45,7 +45,7 @@ class TaskStartedPayload(BaseModel):
 
 class TaskProgressPayload(BaseModel):
     percent: int = Field(..., ge=0, le=100, description="总体进度百分比")
-    current_stage: str = Field(..., description="当前所处阶段描述")
+    current_stage: Optional[str] = Field(default=None, description="当前所处阶段描述")
     stage: Optional[str] = Field(default=None, description="兼容旧版字段")
     active_roles: List[AgentRoleEnum] = Field(default_factory=list, description="正在活跃计算的角色")
     explanation: Optional[str] = Field(default=None, description="阶段执行说明")
@@ -56,9 +56,21 @@ class TaskProgressPayload(BaseModel):
     reflection_applied: Optional[bool] = Field(default=None, description="是否触发了反思消歧")
     agent_results: List[Dict[str, Any]] = Field(default_factory=list, description="各智能体执行结果简报")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_stage_compat(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "stage" in data and not data.get("current_stage"):
+                data["current_stage"] = data["stage"]
+            elif "current_stage" in data and not data.get("stage"):
+                data["stage"] = data["current_stage"]
+        return data
+
     def model_post_init(self, __context: Any) -> None:
-        if not self.stage:
+        if not self.stage and self.current_stage:
             self.stage = self.current_stage
+        if not self.current_stage and self.stage:
+            self.current_stage = self.stage
 
 class NodeStatusPayload(BaseModel):
     role: AgentRoleEnum = Field(..., description="节点角色")
