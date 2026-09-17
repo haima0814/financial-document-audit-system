@@ -409,7 +409,9 @@ def test_formatters_fail_closed_contract():
         }));
     });
     """
-    res = subprocess.run(["node", "-e", code], capture_output=True, encoding="utf-8", check=True)
+    import pathlib
+    repo_root = pathlib.Path(__file__).resolve().parents[3]
+    res = subprocess.run(["node", "-e", code], cwd=str(repo_root), capture_output=True, encoding="utf-8", check=True)
     out = json.loads(res.stdout.strip())
     assert out["agent_status"] == "UNKNOWN"
     assert out["agent_reason"] == "未提供执行说明"

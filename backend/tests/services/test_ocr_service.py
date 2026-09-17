@@ -383,3 +383,128 @@ def test_chinese_currency_parser():
     assert ChineseCurrencyParser.parse("伍万元整") == Decimal("50000.00")
     assert ChineseCurrencyParser.parse("壹佰贰拾叁元肆角伍分") == Decimal("123.45")
     assert ChineseCurrencyParser.parse("非法字符") is None
+
+
+# -----------------------------------------------------------------------------
+# 14. 铁路票金额多格式解析专项测试 (¥54, ¥54.0, ¥54.00, ￥54.0元)
+# -----------------------------------------------------------------------------
+def test_money_candidates_extraction_variations():
+    tokens = [
+        _make_token("票价：¥54"),
+        _make_token("实收：¥54.0"),
+        _make_token("金额：¥54.00"),
+        _make_token("票价：￥54.0元"),
+        _make_token("费用：54.0元"),
+        _make_token("总计：54元"),
+        _make_token("服务费：1,234.50"),
+        _make_token("2017年06月24日14:37开"),
+        _make_token("04车12D号"),
+        _make_token("D3233·宁波站"),
+        _make_token("3302061987****4682林璐"),
+        _make_token("90041300310625G052971杭州东售"),
+    ]
+    candidates = InvoiceOcrService._extract_money_candidates(tokens)
+    values = [c.value for c in candidates]
+    # 前 6 个均为 54.00，第 7 个为 1234.50
+    assert Decimal("54.00") in values
+    assert Decimal("1234.50") in values
+    # 日期、车次、车厢、身份证、条码售票号严禁作为金额提取
+    for v in values:
+        assert v not in [Decimal("2017.00"), Decimal("4.00"), Decimal("12.00"), Decimal("3233.00")]
+
+
+# -----------------------------------------------------------------------------
+# 15. 真实铁路客票图片/Token 端到端全量解析回归 (杭州东 -> 宁波 D3233)
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_train_ticket_real_fixture_parsing():
+    fixture_path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "uploads", "invoices", "inv_2f26c8034576.png"
+    )
+    if os.path.exists(fixture_path):
+        with open(fixture_path, "rb") as f:
+            img_bytes = f.read()
+        res = await InvoiceOcrService.parse_uploaded_file("inv_2f26c8034576.png", img_bytes)
+    else:
+        # Fallback to exact tokens from the image
+        tokens = [
+            _make_token("Z31G052971", [57, 73, 137, 355]),
+            _make_token("检票：5A", [67, 719, 143, 867]),
+            _make_token("杭州东站", [155, 123, 248, 356]),
+            _make_token("D3233·宁波站", [151, 400, 260, 843]),
+            _make_token("Hangzhoudong", [246, 127, 314, 351]),
+            _make_token("Ningbo", [248, 664, 316, 778]),
+            _make_token("2017年06月24日14:37开", [320, 91, 387, 516]),
+            _make_token("04车12D号", [320, 590, 389, 768]),
+            _make_token("支折", [393, 394, 469, 475]),
+            _make_token("￥54.0元", [401, 95, 461, 239]),
+            _make_token("二等座", [395, 650, 465, 767]),
+            _make_token("限乘当日当次车", [477, 90, 538, 341]),
+            _make_token("3302061987****4682林璐", [628, 87, 695, 554]),
+            _make_token("90041300310625G052971杭州东售", [876, 87, 938, 600]),
+        ]
+        with patch.object(InvoiceOcrService, "_extract_tokens_from_image", return_value=tokens):
+            res = await InvoiceOcrService.parse_uploaded_file("mock_train.png", b"fake_bytes")
+
+    assert res["parse_status"] == "SUCCESS"
+    inv = res["invoice_data"]
+    assert inv["invoice_type"] == "铁路客票"
+    assert inv["total_amount"] == 54.00
+    assert inv["departure_station"] == "杭州东站"
+    assert inv["arrival_station"] == "宁波站"
+    assert inv["departure_city"] == "杭州"
+    assert inv["arrival_city"] == "宁波"
+    assert inv["train_no"] == "D3233"
+    assert inv["travel_date"] == "2017-06-24"
+    assert inv["departure_time"] == "2017-06-24T14:37:00"
+    assert inv["arrival_time"] is None, "禁止猜测到达时间"
+    assert inv["seat_type"] == "二等座"
+    assert inv["ticket_number"] == "Z31G052971"
+    assert inv["passenger_name"] == "林璐"
+
+    # 严禁将增值税发票三元组结构强套在铁路客票上
+    assert inv["untaxed_amount"] is None
+    assert inv["tax_amount"] is None
+    assert inv["tax_rate"] is None
+    assert inv["seller_tax_id"] is None
+    assert inv["buyer_tax_id"] is None
+    assert inv["issue_date"] is None, "禁止将 travel_date 误写入 issue_date"
+
+    # 推荐明细项核验
+    rec = res["recommended_line_item"]
+    assert rec is not None
+    assert rec["expense_type"] == "交通费"
+    assert rec["item_desc"] == "杭州东-宁波 D3233 二等座铁路客票"
+    assert rec["amount"] == 54.00
+    assert rec["city_name"] == "宁波"
+
+    # 行程移动段核验
+    seg = inv["travel_segment"]
+    assert seg is not None
+    assert seg["departure_city"] == "杭州"
+    assert seg["arrival_city"] == "宁波"
+    assert seg["departure_time"] == "2017-06-24T14:37:00"
+    assert seg["arrival_time"] is None
+    assert seg["travel_date"] == "2017-06-24"
+    assert seg["transport_mode"] == "TRAIN"
+    assert seg["transport_no"] == "D3233"
+
+
+# -----------------------------------------------------------------------------
+# 16. recommended_line_item 缺失场景契约防崩测试
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_train_ticket_recommended_line_item_none_resilience():
+    # 构造一张只有车次和站点、但金额未提取到的车票
+    tokens = [
+        _make_token("杭州东站", [155, 123, 248, 356]),
+        _make_token("D3233·宁波站", [151, 400, 260, 843]),
+        _make_token("限乘当日当次车", [477, 90, 538, 341]),
+    ]
+    with patch.object(InvoiceOcrService, "_extract_tokens_from_image", return_value=tokens):
+        res = await InvoiceOcrService.parse_uploaded_file("no_amt_train.png", b"fake_bytes")
+
+    assert res["parse_status"] in ["NEED_REVIEW", "FAILED"]
+    assert res["recommended_line_item"] is None
+    assert "INVOICE_TOTAL_AMOUNT_MISSING" in res["quality_issues"]
+

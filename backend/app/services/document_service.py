@@ -201,7 +201,7 @@ class DocumentService:
                     "bbox_positions": inv_in.bbox_positions or {},
                     "ocr_confidence": inv_in.ocr_confidence or 0.985,
                     "file_path": file_path,
-                    **{k: getattr(inv_in, k) for k in ["departure_city", "arrival_city", "departure_time", "arrival_time", "train_no", "flight_no"] if getattr(inv_in, k, None) is not None}
+                    **{k: getattr(inv_in, k) for k in ["departure_city", "arrival_city", "departure_time", "arrival_time", "train_no", "flight_no", "travel_date", "departure_station", "arrival_station", "ticket_number", "seat_type", "passenger_name"] if getattr(inv_in, k, None) is not None}
                 }
             )
             self.db.add(inv_record)

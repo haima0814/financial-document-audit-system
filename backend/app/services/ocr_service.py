@@ -322,16 +322,20 @@ class InvoiceOcrService:
     # =========================================================================
     @classmethod
     def _extract_money_candidates(cls, tokens: List[OcrToken]) -> List[FieldCandidate]:
-        """提取所有符合金额规范的候选数值 (统一转 Decimal，严禁 float 中间计算)"""
-        money_re = re.compile(r'[¥￥$]?\s*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2}|[0-9]+\.[0-9]{2})\b')
+        """提取所有符合金额规范的候选数值 (统一转 Decimal 并 quantize 0.01，严禁 float 中间计算)"""
+        money_re = re.compile(
+            r'(?:[¥￥$]\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)\s*元?'
+            r'|(?<![0-9A-Za-z])([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)\s*元'
+            r'|\b([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2}|[0-9]+\.[0-9]{2})\b)'
+        )
         candidates = []
 
         for t in tokens:
             cleaned = t.text.replace('￥', '¥')
             for m in money_re.finditer(cleaned):
-                s = m.group(1).replace(',', '')
+                s = next(g for g in m.groups() if g is not None).replace(',', '')
                 try:
-                    val = Decimal(s)
+                    val = Decimal(s).quantize(Decimal("0.01"))
                     if val <= 0:
                         continue
                     candidates.append(FieldCandidate(
@@ -965,6 +969,394 @@ class InvoiceOcrService:
         }
 
     # =========================================================================
+    # 4.5. 铁路客票/火车票专用结构化解析器
+    # =========================================================================
+    @classmethod
+    def _is_train_ticket(cls, tokens: List[OcrToken]) -> bool:
+        """识别是否为铁路客票/火车票凭证"""
+        full_text = " ".join(t.text for t in tokens)
+
+        # 强特征信号
+        has_railway_keywords = any(kw in full_text for kw in [
+            "限乘当日当次车", "二等座", "一等座", "商务座", "特等座", "高级软卧", "软卧", "硬卧", "无座", "硬座", "软座", "动卧"
+        ])
+        has_train_no = bool(re.search(r'(?<![A-Za-z0-9])([GDCKTZ]\d{1,4})(?![A-Za-z0-9])', full_text))
+        has_station = "站" in full_text
+        has_kai = any(re.search(r'\d{1,2}:\d{2}\s*开', t.text) for t in tokens) or "开" in full_text
+
+        # 综合判定：
+        # 1. 明确席别或限乘说明 + (车次号 or 站)
+        if has_railway_keywords and (has_train_no or has_station):
+            return True
+        # 2. 车次号 + 包含“站” + 开车时刻
+        if has_train_no and has_station and has_kai:
+            return True
+        # 3. 车次号紧邻“站”，如 D3233·宁波站
+        if any(re.search(r'[GDCKTZ]\d{1,4}[·\-\s至到][^\s·至到\d]+站', t.text) for t in tokens):
+            return True
+
+        return False
+
+    @classmethod
+    def _parse_train_ticket(
+        cls,
+        tokens: List[OcrToken],
+        filename: str,
+        saved_filename: str,
+        file_hash: str,
+        file_size: int,
+        ext: str
+    ) -> Dict[str, Any]:
+        """专门解析铁路客票/火车票 (交通票据事实驱动，禁止强套增值税发票结构)"""
+        from engines.policy_agent.city_geo import get_city_geo
+
+        # 1. 车次提取 (G/D/C/K/T/Z + 1~4位纯数字)
+        train_no = None
+        train_token = None
+        for t in tokens:
+            m = re.search(r'(?<![A-Za-z0-9])([GDCKTZ]\d{1,4})(?![A-Za-z0-9])', t.text)
+            if m:
+                train_no = m.group(1)
+                train_token = t
+                break
+
+        # 2. 到达站与始发站提取
+        arrival_station = None
+        arrival_token = None
+        departure_station = None
+        departure_token = None
+
+        # 优先从形如 "D3233·宁波站" 或 "D3233-宁波站" 或 "D3233至宁波站" 中提取到达站
+        for t in tokens:
+            m = re.search(r'[GDCKTZ]\d{1,4}[·\-\s至到]+([^\s·至到\d]+(?:站)?)', t.text)
+            if m:
+                arrival_station = m.group(1)
+                arrival_token = t
+                break
+
+        # 始发站：查找包含“站”的有效站点 Token (排除“检票”、“限乘”、售票点如“杭州东售”等干扰项)
+        for t in tokens:
+            if "站" in t.text and not t.text.endswith("售") and "检票" not in t.text and "限乘" not in t.text:
+                m = re.search(r'([^\s·至到\d]+站)', t.text)
+                if m:
+                    st = m.group(1)
+                    if st != arrival_station and not departure_station:
+                        departure_station = st
+                        departure_token = t
+
+        # 若未通过组合模式提取到达站，则在站点候选中按空间左右区分 (始发在左，到达在右)
+        if not arrival_station or not departure_station:
+            candidate_stations = []
+            for t in tokens:
+                if "站" in t.text and not t.text.endswith("售") and "检票" not in t.text and "限乘" not in t.text:
+                    m = re.search(r'([^\s·至到\d]+站)', t.text)
+                    if m:
+                        candidate_stations.append((m.group(1), t))
+            if len(candidate_stations) >= 2:
+                candidate_stations.sort(key=lambda x: (x[1].bbox[1] if x[1].bbox else 0))
+                if not departure_station:
+                    departure_station = candidate_stations[0][0]
+                    departure_token = candidate_stations[0][1]
+                if not arrival_station:
+                    arrival_station = candidate_stations[-1][0]
+                    arrival_token = candidate_stations[-1][1]
+
+        # 解析标准城市 (利用现有城市库包含匹配解析城市，严禁暴力删除'南/北/东/西')
+        dep_geo = get_city_geo(departure_station)
+        arr_geo = get_city_geo(arrival_station)
+        departure_city = dep_geo.short_name if dep_geo else (departure_station.replace("站", "") if departure_station else None)
+        arrival_city = arr_geo.short_name if arr_geo else (arrival_station.replace("站", "") if arrival_station else None)
+
+        # 3. 真实行程日期与发车时间 (严禁猜测到达时间 arrival_time，严格保留为 None)
+        travel_date = None
+        departure_time = None
+        date_token = None
+        for t in tokens:
+            m = re.search(r'([0-9]{4})\s*[年\-\.\/]\s*([0-9]{1,2})\s*[月\-\.\/]\s*([0-9]{1,2})\s*日?\s*([0-9]{1,2})[:：]([0-9]{2})\s*开?', t.text)
+            if m:
+                y, mo, d, h, mi = m.groups()
+                travel_date = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+                departure_time = f"{travel_date}T{int(h):02d}:{int(mi):02d}:00"
+                date_token = t
+                break
+
+        # 4. 席别
+        seat_type = None
+        seat_token = None
+        for kw in ["商务座", "特等座", "一等座", "二等座", "高级软卧", "软卧", "硬卧", "动卧", "硬座", "软座", "无座"]:
+            for t in tokens:
+                if kw in t.text:
+                    seat_type = kw
+                    seat_token = t
+                    break
+            if seat_type:
+                break
+
+        # 5. 票头印刷号 (如 Z31G052971)
+        ticket_number = None
+        ticket_token = None
+        for t in tokens:
+            if t.bbox and t.bbox[0] < 250:
+                m = re.search(r'\b([A-Z][0-9A-Z]{6,12})\b', t.text)
+                if m and not re.search(r'^[GDCKTZ]\d{1,4}$', m.group(1)):
+                    ticket_number = m.group(1)
+                    ticket_token = t
+                    break
+        if not ticket_number:
+            for t in tokens:
+                m = re.search(r'\b([A-Z][0-9A-Z]{7,12})\b', t.text)
+                if m and not re.search(r'^[GDCKTZ]\d{1,4}$', m.group(1)):
+                    ticket_number = m.group(1)
+                    ticket_token = t
+                    break
+
+        # 6. 乘车人姓名
+        passenger_name = None
+        passenger_token = None
+        for t in tokens:
+            m = re.search(r'\d{6}[\d\*]{6,12}[0-9Xx*]{1,4}\s*([\u4e00-\u9fa5]{2,4})', t.text)
+            if m:
+                passenger_name = m.group(1)
+                passenger_token = t
+                break
+
+        # 7. 票面金额提取 (支持 0~2 位小数，如 ￥54.0元 -> Decimal('54.00'))
+        money_candidates = cls._extract_money_candidates(tokens)
+        total_amt: Optional[Decimal] = None
+        amount_token: Optional[OcrToken] = None
+        if money_candidates:
+            explicit_cands = [c for c in money_candidates if any(kw in c.raw_text for kw in ["¥", "￥", "$", "元"])]
+            if explicit_cands:
+                best_amt = explicit_cands[0]
+            else:
+                best_amt = money_candidates[0]
+            total_amt = best_amt.value
+            for t in tokens:
+                if str(total_amt) in t.text or (str(best_amt.value).rstrip('0').rstrip('.') in t.text):
+                    amount_token = t
+                    break
+
+        # 8. 组装字段级证据与 BBox 坐标
+        all_field_details: Dict[str, FieldDetail] = {
+            "invoice_type": FieldDetail(
+                value="铁路客票",
+                status=FieldStatus.CONFIRMED,
+                confidence=0.99,
+                source=TokenSource.RAPIDOCR,
+                raw_text="铁路客票"
+            ),
+            "invoice_code": FieldDetail(
+                value="NONE",
+                status=FieldStatus.CONFIRMED,
+                confidence=0.99,
+                source=TokenSource.RAPIDOCR,
+                raw_text="NONE"
+            ),
+            "invoice_number": FieldDetail(
+                value=ticket_number or train_no,
+                status=FieldStatus.CONFIRMED if (ticket_number or train_no) else FieldStatus.MISSING,
+                confidence=ticket_token.confidence if ticket_token else 0.9,
+                source=ticket_token.source if ticket_token else TokenSource.RAPIDOCR,
+                bbox=ticket_token.bbox if ticket_token else None,
+                raw_text=ticket_token.text if ticket_token else ""
+            ),
+            "total_amount": FieldDetail(
+                value=total_amt,
+                status=FieldStatus.CONFIRMED if total_amt is not None else FieldStatus.MISSING,
+                confidence=0.98 if total_amt is not None else 0.0,
+                source=amount_token.source if amount_token else TokenSource.RAPIDOCR,
+                bbox=amount_token.bbox if amount_token else None,
+                raw_text=amount_token.text if amount_token else str(total_amt)
+            ),
+            "untaxed_amount": FieldDetail(status=FieldStatus.MISSING),
+            "tax_amount": FieldDetail(status=FieldStatus.MISSING),
+            "tax_rate": FieldDetail(status=FieldStatus.MISSING),
+            "seller_name": FieldDetail(
+                value="中国铁路",
+                status=FieldStatus.CONFIRMED,
+                confidence=0.99,
+                source=TokenSource.RAPIDOCR,
+                raw_text="中国铁路"
+            ),
+            "seller_tax_id": FieldDetail(status=FieldStatus.MISSING),
+            "buyer_name": FieldDetail(
+                value=passenger_name,
+                status=FieldStatus.CONFIRMED if passenger_name else FieldStatus.MISSING,
+                confidence=passenger_token.confidence if passenger_token else 0.0,
+                source=passenger_token.source if passenger_token else TokenSource.RAPIDOCR,
+                bbox=passenger_token.bbox if passenger_token else None,
+                raw_text=passenger_token.text if passenger_token else ""
+            ),
+            "buyer_tax_id": FieldDetail(status=FieldStatus.MISSING),
+            "issue_date": FieldDetail(status=FieldStatus.MISSING),
+            "departure_station": FieldDetail(
+                value=departure_station,
+                status=FieldStatus.CONFIRMED if departure_station else FieldStatus.MISSING,
+                confidence=departure_token.confidence if departure_token else 0.0,
+                source=departure_token.source if departure_token else TokenSource.RAPIDOCR,
+                bbox=departure_token.bbox if departure_token else None,
+                raw_text=departure_token.text if departure_token else ""
+            ),
+            "arrival_station": FieldDetail(
+                value=arrival_station,
+                status=FieldStatus.CONFIRMED if arrival_station else FieldStatus.MISSING,
+                confidence=arrival_token.confidence if arrival_token else 0.0,
+                source=arrival_token.source if arrival_token else TokenSource.RAPIDOCR,
+                bbox=arrival_token.bbox if arrival_token else None,
+                raw_text=arrival_token.text if arrival_token else ""
+            ),
+            "train_no": FieldDetail(
+                value=train_no,
+                status=FieldStatus.CONFIRMED if train_no else FieldStatus.MISSING,
+                confidence=train_token.confidence if train_token else 0.0,
+                source=train_token.source if train_token else TokenSource.RAPIDOCR,
+                bbox=train_token.bbox if train_token else None,
+                raw_text=train_token.text if train_token else ""
+            ),
+            "travel_date": FieldDetail(
+                value=travel_date,
+                status=FieldStatus.CONFIRMED if travel_date else FieldStatus.MISSING,
+                confidence=date_token.confidence if date_token else 0.0,
+                source=date_token.source if date_token else TokenSource.RAPIDOCR,
+                bbox=date_token.bbox if date_token else None,
+                raw_text=date_token.text if date_token else ""
+            ),
+            "departure_time": FieldDetail(
+                value=departure_time,
+                status=FieldStatus.CONFIRMED if departure_time else FieldStatus.MISSING,
+                confidence=date_token.confidence if date_token else 0.0,
+                source=date_token.source if date_token else TokenSource.RAPIDOCR,
+                bbox=date_token.bbox if date_token else None,
+                raw_text=date_token.text if date_token else ""
+            ),
+            "seat_type": FieldDetail(
+                value=seat_type,
+                status=FieldStatus.CONFIRMED if seat_type else FieldStatus.MISSING,
+                confidence=seat_token.confidence if seat_token else 0.0,
+                source=seat_token.source if seat_token else TokenSource.RAPIDOCR,
+                bbox=seat_token.bbox if seat_token else None,
+                raw_text=seat_token.text if seat_token else ""
+            )
+        }
+
+        bbox_positions: Dict[str, List[int]] = {}
+        for fname, fdet in all_field_details.items():
+            if fdet.bbox and len(fdet.bbox) == 4:
+                bbox_positions[fname] = fdet.bbox
+
+        active_confs = [fd.confidence for fd in all_field_details.values() if fd.status != FieldStatus.MISSING]
+        overall_conf = round(sum(active_confs) / len(active_confs), 3) if active_confs else 0.85
+
+        # 质量状态判定 (铁路客票核心要素齐全即判定 SUCCESS，不强制专票税率)
+        quality_issues = []
+        if total_amt is None:
+            quality_issues.append("INVOICE_TOTAL_AMOUNT_MISSING")
+        if not (ticket_number or train_no):
+            quality_issues.append("INVOICE_NUMBER_MISSING")
+
+        if total_amt and (train_no or ticket_number) and (departure_station or arrival_station):
+            parse_status = "SUCCESS"
+            ocr_status = "SUCCESS"
+        elif total_amt:
+            parse_status = "NEED_REVIEW"
+            ocr_status = "NEED_REVIEW"
+        else:
+            parse_status = "FAILED"
+            ocr_status = "FAILED"
+
+        # 9. 智能推荐明细项
+        dep_display = departure_station.replace("站", "") if departure_station else (departure_city or "出发地")
+        arr_display = arrival_station.replace("站", "") if arrival_station else (arrival_city or "目的地")
+        train_display = train_no or "铁路"
+        seat_display = f" {seat_type}" if seat_type else ""
+        item_desc = f"{dep_display}-{arr_display} {train_display}{seat_display}客票" if (departure_station or arrival_station) else "交通费客票"
+        if departure_station and arrival_station and train_no and seat_type:
+            item_desc = f"{dep_display}-{arr_display} {train_no} {seat_type}铁路客票"
+
+        rec_item = {
+            "expense_type": "交通费",
+            "item_desc": item_desc,
+            "amount": float(total_amt) if total_amt is not None else 0.0,
+            "city_name": arrival_city or dep_display
+        } if total_amt else None
+
+        invoice_hash = cls._compute_invoice_hash(
+            code="NONE",
+            number=ticket_number or train_no or f"TRAIN_{uuid.uuid4().hex[:8]}",
+            amount=total_amt,
+            date=travel_date
+        )
+
+        validation = {
+            "amount_equation_valid": True,
+            "detail_amount_sum_valid": True,
+            "detail_tax_sum_valid": True,
+            "tax_rate_consistent": True
+        }
+
+        travel_segment = {
+            "departure_city": departure_city,
+            "arrival_city": arrival_city,
+            "departure_time": departure_time,
+            "arrival_time": None,
+            "travel_date": travel_date,
+            "transport_mode": "TRAIN",
+            "transport_no": train_no,
+            "source_desc": f"{train_no or '铁路客票'}: {departure_city} -> {arrival_city}"
+        } if (departure_city and arrival_city) else None
+
+        logger.info(
+            f"铁路客票解析完成 [{filename}]: status={parse_status}, train={train_no}, "
+            f"{departure_station}->{arrival_station}, total={total_amt}, travel_date={travel_date}"
+        )
+
+        return {
+            "file_info": {
+                "file_name": filename,
+                "file_type": ext.replace(".", "").upper(),
+                "file_path": f"/uploads/invoices/{saved_filename}",
+                "file_hash": file_hash,
+                "file_size_bytes": file_size,
+                "is_invoice": True,
+                "ocr_status": ocr_status
+            },
+            "invoice_data": {
+                "invoice_code": "NONE",
+                "invoice_number": ticket_number or train_no or "UNKNOWN",
+                "invoice_type": "铁路客票",
+                "total_amount": float(total_amt) if total_amt is not None else None,
+                "untaxed_amount": None,
+                "tax_amount": None,
+                "tax_rate": None,
+                "seller_name": "中国铁路",
+                "seller_tax_id": None,
+                "buyer_name": passenger_name,
+                "buyer_tax_id": None,
+                "issue_date": None,
+                "travel_date": travel_date,
+                "departure_station": departure_station,
+                "arrival_station": arrival_station,
+                "departure_city": departure_city,
+                "arrival_city": arrival_city,
+                "train_no": train_no,
+                "departure_time": departure_time,
+                "arrival_time": None,
+                "seat_type": seat_type,
+                "ticket_number": ticket_number,
+                "passenger_name": passenger_name,
+                "invoice_hash": invoice_hash,
+                "ocr_confidence": overall_conf,
+                "bbox_positions": bbox_positions,
+                "field_details": {k: v.to_dict() for k, v in all_field_details.items()},
+                "travel_segment": travel_segment
+            },
+            "quality_issues": quality_issues,
+            "validation": validation,
+            "parse_status": parse_status,
+            "recommended_line_item": rec_item
+        }
+
+    # =========================================================================
     # 5. 主流水线入口 parse_uploaded_file
     # =========================================================================
     @classmethod
@@ -1097,6 +1489,17 @@ class InvoiceOcrService:
                 "parse_status": "FAILED",
                 "recommended_line_item": None
             }
+
+        # 针对铁路客票/火车票，路由至专门的解析逻辑 (交通票据事实驱动，禁止强套增值税发票结构)
+        if cls._is_train_ticket(tokens):
+            return cls._parse_train_ticket(
+                tokens=tokens,
+                filename=filename,
+                saved_filename=saved_filename,
+                file_hash=file_hash,
+                file_size=file_size,
+                ext=ext
+            )
 
         # 1. 提取所有关键候选
         money_candidates = cls._extract_money_candidates(tokens)

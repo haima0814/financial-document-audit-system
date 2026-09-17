@@ -90,8 +90,11 @@ class AuditContextBuilder:
                 "raw_ocr_data": getattr(inv, "raw_payload", None) or {},
                 "departure_city": (getattr(inv, "raw_payload", None) or {}).get("departure_city"),
                 "arrival_city": (getattr(inv, "raw_payload", None) or {}).get("arrival_city"),
+                "departure_station": (getattr(inv, "raw_payload", None) or {}).get("departure_station"),
+                "arrival_station": (getattr(inv, "raw_payload", None) or {}).get("arrival_station"),
                 "departure_time": (getattr(inv, "raw_payload", None) or {}).get("departure_time"),
                 "arrival_time": (getattr(inv, "raw_payload", None) or {}).get("arrival_time"),
+                "travel_date": (getattr(inv, "raw_payload", None) or {}).get("travel_date"),
                 "train_no": (getattr(inv, "raw_payload", None) or {}).get("train_no"),
                 "flight_no": (getattr(inv, "raw_payload", None) or {}).get("flight_no"),
                 "raw_payload": getattr(inv, "raw_payload", None) or {}

@@ -119,16 +119,16 @@
                     <el-button type="danger" link icon="Delete" @click="removeInvoice(idx)" />
                   </div>
                   <div class="inv-meta-row">
-                    <span class="label">发票代码/号码：</span>
-                    <span class="val font-mono">{{ inv.invoice_code !== 'NONE' ? inv.invoice_code + ' / ' : '' }}{{ inv.invoice_number }}</span>
+                    <span class="label">{{ inv.invoice_type === '铁路客票' ? '车次/票号：' : '发票代码/号码：' }}</span>
+                    <span class="val font-mono">{{ (inv.invoice_code && inv.invoice_code !== 'NONE') ? inv.invoice_code + ' / ' : '' }}{{ inv.invoice_number || inv.ticket_number || '--' }}</span>
                   </div>
                   <div class="inv-meta-row">
-                    <span class="label">销方名称：</span>
-                    <span class="val text-ellipsis" :title="inv.seller_name">{{ inv.seller_name }}</span>
+                    <span class="label">{{ inv.invoice_type === '铁路客票' ? '行程区段：' : '销方名称：' }}</span>
+                    <span class="val text-ellipsis" :title="inv.seller_name">{{ (inv.departure_station && inv.arrival_station) ? `${inv.departure_station} → ${inv.arrival_station}` : (inv.seller_name || '--') }}</span>
                   </div>
                   <div class="inv-card-footer">
-                    <span class="amount-label">价税合计：</span>
-                    <strong class="amount-val">¥{{ Number(inv.total_amount).toFixed(2) }}</strong>
+                    <span class="amount-label">{{ inv.invoice_type === '铁路客票' ? '票面金额：' : '价税合计：' }}</span>
+                    <strong class="amount-val">¥{{ inv.total_amount != null ? Number(inv.total_amount).toFixed(2) : '--' }}</strong>
                     <el-tag size="small" type="success" style="margin-left: auto;">
                       置信度 {{ Math.round((inv.ocr_confidence || 0.985) * 100) }}%
                     </el-tag>
@@ -296,8 +296,8 @@ const removeLineItem = (idx) => {
 
 // 处理 OCR 结构化解析结果并自动平账填表明细
 const processOcrResult = (res) => {
-  const invData = res.invoice_data
-  const recItem = res.recommended_line_item
+  const invData = res.invoice_data || {}
+  const recItem = res.recommended_line_item || null
   const fileInfo = res.file_info
 
   if (fileInfo && fileInfo.file_path) {
@@ -321,16 +321,26 @@ const processOcrResult = (res) => {
       amount: recItem.amount,
       city_name: recItem.city_name || ''
     })
+
+    // 3. 自动同步申报总额完成前置硬校验平账
+    const sum = form.line_items.reduce((acc, cur) => acc + (Number(cur.amount) || 0), 0)
+    form.total_amount = Number(sum.toFixed(2))
   }
 
-  // 3. 自动同步申报总额完成前置硬校验平账
-  const sum = form.line_items.reduce((acc, cur) => acc + (Number(cur.amount) || 0), 0)
-  form.total_amount = Number(sum.toFixed(2))
+  const itemLabel = recItem?.expense_type || '待人工确认科目'
+  const isReviewOrFailed = res.parse_status === 'NEED_REVIEW' || res.parse_status === 'FAILED'
+  const title = isReviewOrFailed ? '⚠️ 已识别部分票据信息，请人工确认' : '✅ 发票 OCR 识别就绪'
+  const notifType = isReviewOrFailed ? 'warning' : 'success'
+  const invDisplay = invData.invoice_number || invData.ticket_number || '凭证'
+  const amtDisplay = invData.total_amount != null ? ` ¥${Number(invData.total_amount).toFixed(2)}` : ''
+  const message = recItem
+    ? `已解析发票 [${invDisplay}]，自动生成【${itemLabel}】明细${amtDisplay} 并自动平账！`
+    : `已解析票据 [${invDisplay}]，未提取到明确科目，请手动补充明细。`
 
   ElNotification({
-    title: '✅ 发票 OCR 识别就绪',
-    message: `已解析发票 [${invData.invoice_number}]，自动生成【${recItem.expense_type}】明细 ¥${invData.total_amount} 并自动平账！`,
-    type: 'success',
+    title,
+    message,
+    type: notifType,
     duration: 3500
   })
 }

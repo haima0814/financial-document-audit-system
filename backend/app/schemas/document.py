@@ -61,10 +61,16 @@ class InvoiceRecordIn(BaseModel):
     file_path: Optional[str] = None
     departure_city: Optional[str] = None
     arrival_city: Optional[str] = None
+    departure_station: Optional[str] = None
+    arrival_station: Optional[str] = None
     departure_time: Optional[str] = None
     arrival_time: Optional[str] = None
+    travel_date: Optional[str] = None
     train_no: Optional[str] = None
     flight_no: Optional[str] = None
+    ticket_number: Optional[str] = None
+    seat_type: Optional[str] = None
+    passenger_name: Optional[str] = None
     raw_payload: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 class InvoiceRecordOut(InvoiceRecordIn):
