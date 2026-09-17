@@ -217,31 +217,6 @@ class AnomalyAgent:
                         reason="在途时间区间碰撞与多段行程重叠核验完成"
                     ))
 
-                # 兼容旧能力名 travel_segment_consistency
-                travel_statuses = [c.status for c in cap_results if c.capability in ("travel_route_consistency", "travel_date_consistency", "departure_time_check", "in_transit_collision_check")]
-                if CapabilityStatus.BLOCKED in travel_statuses:
-                    comb_status = CapabilityStatus.BLOCKED
-                    comb_reason = "PARTIAL: TRAVEL_TIME_MISSING" if any(c.status == CapabilityStatus.BLOCKED and c.capability == "departure_time_check" for c in cap_results) else "交通行程关键要素缺失"
-                elif CapabilityStatus.PARTIAL in travel_statuses:
-                    comb_status = CapabilityStatus.PARTIAL
-                    comb_reason = "PARTIAL: TRAVEL_ARRIVAL_TIME_NOT_PROVIDED"
-                else:
-                    comb_status = CapabilityStatus.VERIFIED
-                    comb_reason = "交通行程全量核验完成"
-                cap_results.append(CapabilityExecutionResult(
-                    capability="travel_segment_consistency",
-                    status=comb_status,
-                    mandatory=True,
-                    reason=comb_reason
-                ))
-            else:
-                cap_results.append(CapabilityExecutionResult(
-                    capability="travel_segment_consistency",
-                    status=CapabilityStatus.NOT_APPLICABLE,
-                    mandatory=False,
-                    reason="无交通行程凭证"
-                ))
-
         # 4. 时空物理碰撞检测 (R09)
         if run_spatio_check:
             if spatio_points and len(spatio_points) >= 2:

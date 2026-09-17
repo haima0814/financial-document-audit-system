@@ -71,7 +71,10 @@ class AuditResultDTO(BaseModel):
     medium_risks_count: int = Field(default=0, description="中危风险数")
     low_risks_count: int = Field(default=0, description="低危提示数")
     
-    # 审核完整度: COMPLETE(完整) / DEGRADED(有非核心要素降级) / INCOMPLETE(关键核心项超时或失败)
+    # 审核完整度:
+    # COMPLETE：所有 mandatory capability 完成，允许 optional PARTIAL；
+    # DEGRADED：必要核验能力因关键事实/数据源不足而受阻；
+    # INCOMPLETE：mandatory Agent 未执行/失败/超时。
     audit_completeness: str = Field(default="COMPLETE", description="审核完整度: COMPLETE | DEGRADED | INCOMPLETE")
     
     # 高管体检摘要 (CFO 水准研判)
