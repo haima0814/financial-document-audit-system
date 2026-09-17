@@ -87,7 +87,14 @@ class AuditContextBuilder:
                 "seller_name": inv.seller_name,
                 "buyer_tax_id": inv.buyer_tax_id,
                 "invoice_type": inv.invoice_type,
-                "raw_ocr_data": getattr(inv, "raw_payload", None) or {}
+                "raw_ocr_data": getattr(inv, "raw_payload", None) or {},
+                "departure_city": (getattr(inv, "raw_payload", None) or {}).get("departure_city"),
+                "arrival_city": (getattr(inv, "raw_payload", None) or {}).get("arrival_city"),
+                "departure_time": (getattr(inv, "raw_payload", None) or {}).get("departure_time"),
+                "arrival_time": (getattr(inv, "raw_payload", None) or {}).get("arrival_time"),
+                "train_no": (getattr(inv, "raw_payload", None) or {}).get("train_no"),
+                "flight_no": (getattr(inv, "raw_payload", None) or {}).get("flight_no"),
+                "raw_payload": getattr(inv, "raw_payload", None) or {}
             }
             for inv in invoices_orm
         ]
@@ -106,6 +113,13 @@ class AuditContextBuilder:
                         "longitude": lng,
                         "source_desc": item.get("item_desc", "")
                     })
+
+        # 5.5 构建交通票据行程段 (行程路线事实)
+        from engines.orchestrator.master_graph import MasterOrchestrator
+        travel_segments = MasterOrchestrator._extract_travel_segments(
+            invoices=invoices_data,
+            line_items=line_items_data
+        )
 
         # 6. 装配经办人画像与历史行为特征 (由应用层查询聚合，防 Agent 读库)
         applicant = doc.applicant
@@ -163,6 +177,7 @@ class AuditContextBuilder:
             line_items=line_items_data,
             invoices=invoices_data,
             spatio_points=spatio_points,
+            travel_segments=travel_segments,
             applicant_profile=applicant_profile,
             rules=active_rules,
             approval_context=approval_context,

@@ -315,17 +315,21 @@
                 <el-tag size="small" effect="plain" type="info">{{ row.source_cn }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="reason" label="判定依据 / 降级说明" min-width="280">
+            <el-table-column prop="reason_cn" label="判定依据 / 降级说明" min-width="280">
               <template #default="{ row }">
                 <div class="reason-cell">
-                  <span v-if="!expandedRows.has(row.id) && (row.reason && row.reason.length > 60)">
-                    {{ row.reason.slice(0, 60) }}...
-                    <el-button type="primary" link size="small" @click="toggleRowExpand(row.id)">展开</el-button>
-                  </span>
-                  <span v-else>
-                    {{ row.reason }}
-                    <el-button v-if="row.reason && row.reason.length > 60" type="primary" link size="small" @click="toggleRowExpand(row.id)">收起</el-button>
-                  </span>
+                  <el-tooltip :content="`底层标识: ${row.raw_reason}`" placement="top">
+                    <span class="reason-text">
+                      <span v-if="!expandedRows.has(row.id) && (row.reason_cn && row.reason_cn.length > 60)">
+                        {{ row.reason_cn.slice(0, 60) }}...
+                        <el-button type="primary" link size="small" @click="toggleRowExpand(row.id)">展开</el-button>
+                      </span>
+                      <span v-else>
+                        {{ row.reason_cn }}
+                        <el-button v-if="row.reason_cn && row.reason_cn.length > 60" type="primary" link size="small" @click="toggleRowExpand(row.id)">收起</el-button>
+                      </span>
+                    </span>
+                  </el-tooltip>
                 </div>
               </template>
             </el-table-column>
@@ -789,6 +793,10 @@ onMounted(() => {
 
 .chat-col {
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   transition: all 0.25s ease;
 }
 
@@ -900,8 +908,17 @@ onMounted(() => {
 .collapsed-chat-bar:hover { background: #eff6ff; }
 .vertical-text { writing-mode: vertical-lr; letter-spacing: 2px; font-size: 12px; font-weight: 600; }
 
-.chat-wrapper { height: 100%; display: flex; flex-direction: column; }
+.chat-wrapper {
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
 .chat-col-header {
+  flex: 0 0 auto;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -910,7 +927,17 @@ onMounted(() => {
   border-bottom: 1px solid #e2e8f0;
   border-radius: 8px 8px 0 0;
 }
+
 .chat-col-title { font-size: 13px; font-weight: 600; color: #1e293b; }
+
+.chat-wrapper :deep(.audit-chat-container) {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  border-top: none;
+}
 
 .col-header {
   padding: 10px 14px;

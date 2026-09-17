@@ -99,33 +99,58 @@ class AuditPlanner:
         ))
 
         # -------------------------------------------------------------
-        # 3. AnomalyAgent (异常行为与时序欺诈 - 依据发票与时空数据细粒度激活)
+        # 3. AnomalyAgent (异常行为与时序欺诈 - 依据发票、交通行程与时空数据细粒度激活)
         # -------------------------------------------------------------
         anomaly_caps: List[str] = []
+        travel_segments = facts.get("travel_segments") or []
+
         if len(invoices) >= 1:
             anomaly_caps.append("duplicate_invoice_hash_check")
         if len(invoices) >= 2:
             anomaly_caps.append("sequential_invoice_number_check")
+        if len(travel_segments) >= 1:
+            anomaly_caps.append("travel_segment_consistency")
         if len(spatio_points) >= 2:
             anomaly_caps.append("spatio_temporal_trajectory_conflict")
 
         if anomaly_caps:
+            # 判断激活原因：有交通行程但缺失精确发到时刻
+            has_exact_time = any(
+                seg.get("departure_time") and seg.get("arrival_time")
+                for seg in travel_segments
+            )
+            if travel_segments and not has_exact_time and len(invoices) <= 1:
+                anomaly_reason = "PARTIAL: TRAVEL_TIME_MISSING"
+            elif travel_segments:
+                anomaly_reason = "TRAVEL_SEGMENT_DETECTED"
+            else:
+                anomaly_reason = "INVOICE_OR_SPATIO_FACTS_DETECTED"
+
             tasks.append(PlannedAgentTask(
                 role=AgentRoleEnum.ANOMALY,
                 enabled=True,
                 mandatory=False,
                 status=AgentExecutionStatus.PLANNED,
-                reason="INVOICE_OR_SPATIO_FACTS_DETECTED",
+                reason=anomaly_reason,
                 capabilities=anomaly_caps,
-                meta={"invoices_count": len(invoices), "spatio_points_count": len(spatio_points)}
+                meta={
+                    "invoices_count": len(invoices),
+                    "spatio_points_count": len(spatio_points),
+                    "travel_segments_count": len(travel_segments)
+                }
             ))
         else:
+            if document_type == "TRAVEL_REIMBURSEMENT" and len(line_items) > 0:
+                skip_reason = "SKIPPED_INSUFFICIENT_FACTS: 差旅明细仅包含单一行程城市，缺少起止轨迹与时间"
+            else:
+                skip_reason = "NOT_APPLICABLE: NO_INVOICE_AND_INSUFFICIENT_TRAJECTORY_POINTS"
+
             tasks.append(PlannedAgentTask(
                 role=AgentRoleEnum.ANOMALY,
                 enabled=False,
                 mandatory=False,
                 status=AgentExecutionStatus.SKIPPED,
-                reason="NOT_APPLICABLE: NO_INVOICE_AND_INSUFFICIENT_TRAJECTORY_POINTS",
+                reason=skip_reason,
                 capabilities=[],
                 meta={"invoices_count": len(invoices), "spatio_points_count": len(spatio_points)}
             ))

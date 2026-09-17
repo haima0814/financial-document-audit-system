@@ -1277,6 +1277,11 @@ class InvoiceOcrService:
                 "buyer_name": "北京智能前沿科技有限公司",
                 "buyer_tax_id": "91110108MA01XXXXXX",
                 "issue_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "departure_city": "北京",
+                "arrival_city": "上海",
+                "departure_time": None,
+                "arrival_time": None,
+                "train_no": "G13",
                 "recommended_line_item": {
                     "expense_type": "交通费",
                     "item_desc": "北京南-上海虹桥 G13次高铁二等座",

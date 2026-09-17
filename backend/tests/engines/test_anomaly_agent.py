@@ -10,7 +10,9 @@ from engines.anomaly_agent import (
     InvoiceFact,
     SpatioPoint,
     SpatioTemporalVerifier,
-    SequentialDetector
+    SequentialDetector,
+    TravelSegment,
+    TravelSegmentVerifier
 )
 from engines.contract.finding import RiskLevelEnum
 
@@ -391,5 +393,125 @@ async def test_historical_fingerprints_production_chain_with_tampered_amount():
     assert f.actual_value.get("is_amount_modified") is True
     assert f.actual_value.get("historical_amount") == 1500.00
     assert f.actual_value.get("current_amount") == 2000.00
+
+
+def test_scenario_a_single_train_ticket_missing_time_partial():
+    """
+    场景 A：单张火车票 (北京-上海，G13，无精确发到时刻)
+    - 严禁伪造时间 (departure_time=None, arrival_time=None)
+    - 允许执行行程路线与申报明细比对
+    - 不会触发误报时空碰撞
+    """
+    seg = TravelSegment(
+        departure_city="北京",
+        arrival_city="上海",
+        departure_time=None,
+        arrival_time=None,
+        transport_mode="TRAIN",
+        transport_no="G13",
+        source_desc="G13: 北京 -> 上海"
+    )
+    line_items = [
+        {"city_name": "上海", "item_desc": "上海客户拜访", "amount": 500.0}
+    ]
+
+    findings = TravelSegmentVerifier.verify_travel_consistency(
+        segments=[seg],
+        line_items=line_items,
+        spatio_points=[]
+    )
+    # 目的地与申报城市匹配，无碰撞，无任何违规检出
+    assert len(findings) == 0
+
+
+def test_scenario_b_high_speed_rail_normal_transit_no_false_collision():
+    """
+    场景 B：真实发到时刻的高铁行程 (08:00 北京 - 12:30 上海)
+    - 物理位移合法移动路径，绝不误判为超光速碰撞
+    """
+    seg = TravelSegment(
+        departure_city="北京",
+        arrival_city="上海",
+        departure_time=datetime(2026, 9, 10, 8, 0),
+        arrival_time=datetime(2026, 9, 10, 12, 30),
+        transport_mode="TRAIN",
+        transport_no="G13",
+        source_desc="G13: 北京 -> 上海"
+    )
+    line_items = [
+        {"city_name": "上海", "item_desc": "上海差旅住宿", "amount": 400.0, "start_date": "2026-09-10"}
+    ]
+
+    findings = TravelSegmentVerifier.verify_travel_consistency(
+        segments=[seg],
+        line_items=line_items,
+        spatio_points=[]
+    )
+    assert len(findings) == 0
+
+
+def test_scenario_c_simultaneous_transit_remote_consumption():
+    """
+    场景 C：交通行程运行期间在异地城市发生消费记录
+    - 车票：北京 -> 上海 09:00 至 13:30
+    - 离散事件点：广州 11:00 餐饮消费
+    - 触发 R09_SPATIO_TEMPORAL_COLLISION
+    """
+    seg = TravelSegment(
+        departure_city="北京",
+        arrival_city="上海",
+        departure_time=datetime(2026, 9, 10, 9, 0),
+        arrival_time=datetime(2026, 9, 10, 13, 30),
+        transport_mode="TRAIN",
+        transport_no="G1",
+        source_desc="G1: 北京 -> 上海"
+    )
+    remote_point = SpatioPoint(
+        event_time=datetime(2026, 9, 10, 11, 0),
+        city_name="广州",
+        latitude=23.1291,
+        longitude=113.2644,
+        source_desc="广州酒家午餐",
+        invoice_number="INV_GZ_888"
+    )
+
+    findings = TravelSegmentVerifier.verify_travel_consistency(
+        segments=[seg],
+        line_items=[{"city_name": "上海", "amount": 500.0}],
+        spatio_points=[remote_point]
+    )
+    assert len(findings) == 1
+    assert findings[0].rule_code == "R09_SPATIO_TEMPORAL_COLLISION"
+    assert "广州" in findings[0].title
+    assert "INV_GZ_888" in findings[0].description
+
+
+def test_scenario_destination_mismatch_detection():
+    """
+    交通行程目的地与单据申报城市脱节
+    - 车票：北京 -> 成都
+    - 申报单据：仅有上海
+    - 触发 R09_TRAVEL_DESTINATION_MISMATCH
+    """
+    seg = TravelSegment(
+        departure_city="北京",
+        arrival_city="成都",
+        transport_mode="FLIGHT",
+        transport_no="CA4102",
+        source_desc="CA4102: 北京 -> 成都"
+    )
+    line_items = [
+        {"city_name": "上海", "item_desc": "上海项目实施", "amount": 2000.0}
+    ]
+
+    findings = TravelSegmentVerifier.verify_travel_consistency(
+        segments=[seg],
+        line_items=line_items,
+        spatio_points=[]
+    )
+    assert len(findings) == 1
+    assert findings[0].rule_code == "R09_TRAVEL_DESTINATION_MISMATCH"
+    assert "成都" in findings[0].title
+
 
 

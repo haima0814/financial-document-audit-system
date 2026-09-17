@@ -35,6 +35,21 @@ export const executionStatusMap = {
   UNKNOWN: '未知状态'
 }
 
+// 2.5 智能体判定依据 / 规划原因映射
+export const executionReasonMap = {
+  MANDATORY_DETERMINISTIC_RECONCILIATION: '必检：执行金额确定性核对',
+  TRAVEL_POLICY_RULESET: '启用差旅制度合规规则',
+  GENERAL_EXPENSE_RULESET: '启用通用费用合规规则',
+  CORPORATE_PROCUREMENT_RULESET: '启用对公采购合规规则',
+  INVOICE_OR_SPATIO_FACTS_DETECTED: '检测到发票或时空事实，执行异常行为核验',
+  'NOT_APPLICABLE: DOCUMENT_TYPE_EXEMPT': '不适用：当前单据类型无需供应商工商穿透核验',
+  'NOT_APPLICABLE: NO_INVOICE_AND_INSUFFICIENT_TRAJECTORY_POINTS': '不适用：缺少足够的发票或时空轨迹事实',
+  'DATA_MISSING: SUPPLIER_IDENTITY_MISSING': '数据缺失：未提取到有效供应商身份信息',
+  TRAVEL_SEGMENT_DETECTED: '检测到交通行程事实，执行路线与时空一致性核验',
+  'PARTIAL: TRAVEL_TIME_MISSING': '部分核验：已识别交通路线，但缺少精确发到时刻',
+  CORPORATE_PAYMENT_SUPPLIER_DILIGENCE: '执行对公供应商合规穿透与资质审查'
+}
+
 // 3. 风险等级映射
 export const riskLevelMap = {
   HIGH: '高风险',
@@ -153,6 +168,22 @@ export function formatAgentRole(role) {
 }
 
 /**
+ * 格式化智能体判定依据 / 规划原因说明 (英文原因常数映射为业务中文，包含中文的动态说明直接透传)
+ */
+export function formatExecutionReason(reason) {
+  if (!reason) return '未提供执行说明'
+  const text = String(reason).trim()
+  if (executionReasonMap[text]) {
+    return executionReasonMap[text]
+  }
+  // 若包含中文字符，则属于动态中文解释，直接透传严禁二次篡改
+  if (/[\u4e00-\u9fa5]/.test(text)) {
+    return text
+  }
+  return text
+}
+
+/**
  * 统一归一化解析并格式化 Agent Execution Plan
  * 同时完美兼容后端以 Array 交付或 Object 交付的场景
  */
@@ -175,6 +206,8 @@ export function normalizeAgentExecutions(fullReportPayload) {
       // 缺失 source 绝不默认 DETERMINISTIC_RULE
       const rawSource = item.source != null && item.source !== '' ? item.source : 'UNKNOWN'
       const durationMs = item.duration_ms ?? item.elapsed_ms
+      const rawReason = item.reason || item.detail || '未提供执行说明'
+      const formattedReason = formatExecutionReason(rawReason)
 
       normalized.push({
         id: `agent_exec_${i}`,
@@ -185,8 +218,9 @@ export function normalizeAgentExecutions(fullReportPayload) {
         duration: durationMs != null ? `${durationMs} ms` : '-',
         source: String(rawSource),
         source_cn: formatDecisionSource(rawSource),
-        // 缺失 reason 不得默认“核验通过”，改为“未提供执行说明”
-        reason: item.reason || item.detail || '未提供执行说明',
+        reason: formattedReason,
+        reason_cn: formattedReason,
+        raw_reason: String(rawReason),
         is_degraded: Boolean(item.is_degraded || status === 'DEGRADED')
       })
     }
@@ -208,6 +242,8 @@ export function normalizeAgentExecutions(fullReportPayload) {
       // 缺失 source 绝不默认 DETERMINISTIC_RULE
       const rawSource = item.source != null && item.source !== '' ? item.source : 'UNKNOWN'
       const durationMs = item.duration_ms ?? item.elapsed_ms
+      const rawReason = item.reason || item.detail || '未提供执行说明'
+      const formattedReason = formatExecutionReason(rawReason)
 
       normalized.push({
         id: `agent_exec_${i}`,
@@ -218,8 +254,9 @@ export function normalizeAgentExecutions(fullReportPayload) {
         duration: durationMs != null ? `${durationMs} ms` : '-',
         source: String(rawSource),
         source_cn: formatDecisionSource(rawSource),
-        // 缺失 reason 不得默认“核验通过”，改为“未提供执行说明”
-        reason: item.reason || item.detail || '未提供执行说明',
+        reason: formattedReason,
+        reason_cn: formattedReason,
+        raw_reason: String(rawReason),
         is_degraded: Boolean(item.is_degraded || status === 'DEGRADED')
       })
     }
@@ -238,6 +275,8 @@ export function normalizeAgentExecutions(fullReportPayload) {
       source: 'UNKNOWN',
       source_cn: '未知来源',
       reason: '已列入规划流水线，等待调度执行',
+      reason_cn: '已列入规划流水线，等待调度执行',
+      raw_reason: 'PLANNED',
       is_degraded: false
     }))
   }

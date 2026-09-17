@@ -59,6 +59,13 @@ class InvoiceRecordIn(BaseModel):
     ocr_confidence: Optional[float] = 0.98
     bbox_positions: Optional[Dict[str, Any]] = Field(default_factory=dict)
     file_path: Optional[str] = None
+    departure_city: Optional[str] = None
+    arrival_city: Optional[str] = None
+    departure_time: Optional[str] = None
+    arrival_time: Optional[str] = None
+    train_no: Optional[str] = None
+    flight_no: Optional[str] = None
+    raw_payload: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 class InvoiceRecordOut(InvoiceRecordIn):
     id: int

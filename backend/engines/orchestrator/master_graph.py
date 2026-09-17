@@ -19,7 +19,7 @@ from engines.contract.agent_role import AgentRoleEnum
 from engines.amount_agent import AmountAgent
 from engines.policy_agent import PolicyAgent
 from engines.supplier_agent import SupplierAgent
-from engines.anomaly_agent import AnomalyAgent, InvoiceFact, SpatioPoint
+from engines.anomaly_agent import AnomalyAgent, InvoiceFact, SpatioPoint, TravelSegment
 
 from .state import MasterAuditState
 from .stream_producer import StreamProducer
@@ -46,6 +46,64 @@ class MasterOrchestrator:
             return Decimal(s)
         except (InvalidOperation, TypeError, ValueError):
             return None
+
+    @classmethod
+    def _extract_travel_segments(
+        cls,
+        invoices: List[Dict[str, Any]],
+        line_items: List[Dict[str, Any]],
+        context_segments: Optional[List[Dict[str, Any]]] = None
+    ) -> List[Dict[str, Any]]:
+        """从票据事实与明细中提取标准化合法行程段 (严禁伪造发到时刻)"""
+        segments: List[Dict[str, Any]] = []
+        if context_segments:
+            for s in context_segments:
+                segments.append(dict(s))
+            return segments
+
+        for inv in invoices:
+            raw_p = inv.get("raw_payload") or inv.get("raw_ocr_data") or {}
+            dep_city = inv.get("departure_city") or raw_p.get("departure_city")
+            arr_city = inv.get("arrival_city") or raw_p.get("arrival_city")
+            dep_time = inv.get("departure_time") or raw_p.get("departure_time")
+            arr_time = inv.get("arrival_time") or raw_p.get("arrival_time")
+            train_no = inv.get("train_no") or inv.get("flight_no") or raw_p.get("train_no") or raw_p.get("flight_no")
+
+            inv_type = str(inv.get("invoice_type") or "")
+            if (not dep_city or not arr_city) and any(kw in inv_type for kw in ["铁路", "火车", "航空", "机票", "客票", "行程单"]):
+                desc = raw_p.get("item_desc", "")
+                if not desc:
+                    for item in line_items:
+                        item_desc = str(item.get("item_desc") or "")
+                        if "-" in item_desc or "—" in item_desc or "至" in item_desc:
+                            desc = item_desc
+                            break
+                if desc:
+                    import re
+                    m = re.search(r"([^\s\-—至]+)[—\-至到]([^\s\-—次]+)", desc)
+                    if m:
+                        dep_raw = m.group(1).replace("站", "").replace("南", "").replace("北", "").replace("东", "").replace("西", "").replace("虹桥", "").strip()
+                        arr_raw = m.group(2).replace("站", "").replace("南", "").replace("北", "").replace("东", "").replace("西", "").replace("虹桥", "").strip()
+                        dep_city = dep_city or dep_raw
+                        arr_city = arr_city or arr_raw
+                    m_no = re.search(r"([A-Z]\d{1,4})次?", desc)
+                    if m_no:
+                        train_no = train_no or m_no.group(1)
+
+            if dep_city and arr_city:
+                segments.append({
+                    "departure_city": dep_city,
+                    "arrival_city": arr_city,
+                    "departure_time": dep_time, # 严格保持原样，缺时间为 None，严禁猜测
+                    "arrival_time": arr_time,   # 严格保持原样，缺时间为 None，严禁猜测
+                    "travel_date": inv.get("issue_date"),
+                    "transport_mode": "TRAIN" if ("铁" in inv_type or "车" in inv_type) else "FLIGHT",
+                    "transport_no": train_no,
+                    "attachment_id": inv.get("attachment_id", 1),
+                    "invoice_number": inv.get("invoice_number", ""),
+                    "source_desc": f"{train_no or '交通凭证'}: {dep_city} -> {arr_city}"
+                })
+        return segments
 
     @classmethod
     async def run(
@@ -142,6 +200,12 @@ class MasterOrchestrator:
                                 "source_desc": item.get("item_desc") or ""
                             })
 
+            travel_segments_data = cls._extract_travel_segments(
+                invoices=context.invoices,
+                line_items=line_items_data,
+                context_segments=getattr(context, "travel_segments", None)
+            )
+
             state.document_facts = {
                 "document_no": context.document_no,
                 "total_amount": context.total_amount,
@@ -161,11 +225,20 @@ class MasterOrchestrator:
                         "seller_name": inv.get("seller_name", ""),
                         "issue_date": inv.get("issue_date", ""),
                         "is_manual_modified": inv.get("is_manual_modified", False),
-                        "original_extracted_amount": inv.get("original_extracted_amount")
+                        "original_extracted_amount": inv.get("original_extracted_amount"),
+                        "invoice_type": inv.get("invoice_type", ""),
+                        "departure_city": inv.get("departure_city") or (inv.get("raw_payload") or {}).get("departure_city"),
+                        "arrival_city": inv.get("arrival_city") or (inv.get("raw_payload") or {}).get("arrival_city"),
+                        "departure_time": inv.get("departure_time") or (inv.get("raw_payload") or {}).get("departure_time"),
+                        "arrival_time": inv.get("arrival_time") or (inv.get("raw_payload") or {}).get("arrival_time"),
+                        "train_no": inv.get("train_no") or (inv.get("raw_payload") or {}).get("train_no"),
+                        "flight_no": inv.get("flight_no") or (inv.get("raw_payload") or {}).get("flight_no"),
+                        "raw_payload": inv.get("raw_payload") or inv.get("raw_ocr_data") or {}
                     }
                     for inv in context.invoices
                 ],
                 "spatio_points": spatio_points_data,
+                "travel_segments": travel_segments_data,
                 "historical_fingerprints": (
                     context.extra_context.get("historical_fingerprints")
                     if getattr(context, "extra_context", None)
@@ -223,6 +296,35 @@ class MasterOrchestrator:
                                     "source_desc": item.get("item_desc") or ""
                                 })
 
+                invoices_dicts = [
+                    {
+                        "invoice_code": inv.invoice_code,
+                        "invoice_number": inv.invoice_number,
+                        "total_amount": inv.total_amount,
+                        "untaxed_amount": inv.untaxed_amount,
+                        "tax_amount": inv.tax_amount,
+                        "tax_rate": inv.tax_rate,
+                        "seller_tax_id": inv.seller_tax_id,
+                        "seller_name": inv.seller_name,
+                        "issue_date": inv.issue_date,
+                        "is_manual_modified": inv.is_manual_modified,
+                        "original_extracted_amount": inv.original_extracted_amount,
+                        "invoice_type": inv.invoice_type,
+                        "departure_city": (inv.raw_payload or {}).get("departure_city"),
+                        "arrival_city": (inv.raw_payload or {}).get("arrival_city"),
+                        "departure_time": (inv.raw_payload or {}).get("departure_time"),
+                        "arrival_time": (inv.raw_payload or {}).get("arrival_time"),
+                        "train_no": (inv.raw_payload or {}).get("train_no"),
+                        "flight_no": (inv.raw_payload or {}).get("flight_no"),
+                        "raw_payload": inv.raw_payload or {}
+                    }
+                    for inv in doc_invoices
+                ]
+                travel_segments_data = cls._extract_travel_segments(
+                    invoices=invoices_dicts,
+                    line_items=line_items_data
+                )
+
                 extra_attrs = dict(doc.extra_attributes or {})
                 state.document_facts = {
                     "document_no": doc.document_no,
@@ -231,23 +333,9 @@ class MasterOrchestrator:
                     "title": doc.title,
                     "department_name": doc.department_name,
                     "line_items": line_items_data,
-                    "invoices": [
-                        {
-                            "invoice_code": inv.invoice_code,
-                            "invoice_number": inv.invoice_number,
-                            "total_amount": inv.total_amount,
-                            "untaxed_amount": inv.untaxed_amount,
-                            "tax_amount": inv.tax_amount,
-                            "tax_rate": inv.tax_rate,
-                            "seller_tax_id": inv.seller_tax_id,
-                            "seller_name": inv.seller_name,
-                            "issue_date": inv.issue_date,
-                            "is_manual_modified": inv.is_manual_modified,
-                            "original_extracted_amount": inv.original_extracted_amount
-                        }
-                        for inv in doc_invoices
-                    ],
+                    "invoices": invoices_dicts,
                     "spatio_points": spatio_points_data,
+                    "travel_segments": travel_segments_data,
                     "historical_fingerprints": await cls._load_historical_fps_from_db(db, state.document_id),
                     "supplier_profiles": await cls._load_supplier_profiles_from_db(db, doc_invoices),
                     "extra_context": extra_attrs,
@@ -386,11 +474,40 @@ class MasterOrchestrator:
                 coros.append(AgentHarness.execute_safely(role, coro, capabilities=planned_task.capabilities))
             elif role == AgentRoleEnum.ANOMALY:
                 historical_fps = facts.get("historical_fingerprints")
+                travel_segs: List[TravelSegment] = []
+                for s in facts.get("travel_segments", []):
+                    dep_t = s.get("departure_time")
+                    arr_t = s.get("arrival_time")
+                    if isinstance(dep_t, str) and dep_t:
+                        try:
+                            dep_t = datetime.fromisoformat(dep_t)
+                        except Exception:
+                            pass
+                    if isinstance(arr_t, str) and arr_t:
+                        try:
+                            arr_t = datetime.fromisoformat(arr_t)
+                        except Exception:
+                            pass
+                    travel_segs.append(TravelSegment(
+                        departure_city=s["departure_city"],
+                        arrival_city=s["arrival_city"],
+                        departure_time=dep_t if isinstance(dep_t, datetime) else None,
+                        arrival_time=arr_t if isinstance(arr_t, datetime) else None,
+                        travel_date=s.get("travel_date"),
+                        transport_mode=s.get("transport_mode", "TRAIN"),
+                        transport_no=s.get("transport_no"),
+                        attachment_id=s.get("attachment_id", 1),
+                        invoice_number=s.get("invoice_number", ""),
+                        source_desc=s.get("source_desc", "")
+                    ))
+
                 coro = AnomalyAgent.run(
                     db=None,
                     document_id=state.document_id,
                     invoices=invoice_facts,
                     spatio_points=spatio_points,
+                    travel_segments=travel_segs,
+                    line_items=facts.get("line_items", []),
                     historical_fingerprints=historical_fps,
                     capabilities=planned_task.capabilities
                 )

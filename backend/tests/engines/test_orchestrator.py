@@ -567,3 +567,131 @@ async def test_scenario_c_all_mandatory_success_normal_pass(monkeypatch):
     assert decision.target_state == "APPROVED"
 
 
+@pytest.mark.asyncio
+async def test_scenario_travel_ticket_facts_and_planner():
+    """
+    测试交通票据事实驱动 Planner 与 AnomalyAgent：
+    1. 单张火车票（北京-上海，无发到时间）
+    2. Planner 启用 AnomalyAgent 并激活 travel_segment_consistency
+    3. 原因标记为 PARTIAL: TRAVEL_TIME_MISSING
+    4. SupplierAgent 状态为 SKIPPED，原因标记为 NOT_APPLICABLE: DOCUMENT_TYPE_EXEMPT
+    """
+    from engines.orchestrator.planner import AuditPlanner
+    from engines.contract.agent_role import AgentRoleEnum
+    from engines.contract.result import AgentExecutionStatus
+
+    facts = {
+        "document_type": "TRAVEL_REIMBURSEMENT",
+        "line_items": [{"city_name": "上海", "amount": 600.0, "item_desc": "上海客户交流"}],
+        "invoices": [{
+            "invoice_code": "01",
+            "invoice_number": "T1001",
+            "invoice_type": "铁路电子客票",
+            "total_amount": 600.0,
+            "raw_payload": {
+                "departure_city": "北京",
+                "arrival_city": "上海",
+                "train_no": "G13"
+            }
+        }],
+        "spatio_points": [],
+        "travel_segments": [{
+            "departure_city": "北京",
+            "arrival_city": "上海",
+            "departure_time": None,
+            "arrival_time": None,
+            "transport_mode": "TRAIN",
+            "transport_no": "G13"
+        }]
+    }
+
+    plan = AuditPlanner.build_plan(
+        document_id=1,
+        document_type=facts["document_type"],
+        facts=facts
+    )
+    tasks_map = {t.role: t for t in plan.tasks}
+
+    # 验证 AnomalyAgent 激活
+    anomaly_task = tasks_map[AgentRoleEnum.ANOMALY]
+    assert anomaly_task.enabled is True
+    assert "travel_segment_consistency" in anomaly_task.capabilities
+    assert anomaly_task.reason == "PARTIAL: TRAVEL_TIME_MISSING"
+
+    # 验证 SupplierAgent 被跳过并豁免
+    supplier_task = tasks_map[AgentRoleEnum.SUPPLIER]
+    assert supplier_task.enabled is False
+    assert supplier_task.status == AgentExecutionStatus.SKIPPED
+    assert supplier_task.reason == "NOT_APPLICABLE: DOCUMENT_TYPE_EXEMPT"
+
+
+@pytest.mark.asyncio
+async def test_master_orchestrator_travel_ticket_end_to_end(monkeypatch):
+    """
+    测试 MasterOrchestrator 端到端跑通单张火车票差旅单：
+    - 自动提取 travel_segments
+    - AnomalyAgent 正常核验
+    - SupplierAgent 跳过
+    - 最终生成报告无假碰撞
+    """
+    from engines.contract.context import DocumentContext
+    from engines.contract.agent_role import AgentRoleEnum
+    from engines.contract.result import AgentExecutionStatus
+    from app.core.llm_client import LLMClient
+
+    async def mock_rationality(*args, **kwargs):
+        return {"is_rational": True, "source": "LLM_INFERENCE", "risk_analysis": "正常差旅"}
+    monkeypatch.setattr(LLMClient, "audit_policy_rationality", mock_rationality)
+
+    ctx = DocumentContext(
+        document_id=505,
+        document_no="TRV-TRAIN-001",
+        document_type="TRAVEL_REIMBURSEMENT",
+        applicant_id=1,
+        tenant_id=1,
+        total_amount=Decimal("600.00"),
+        title="北京往返上海出差",
+        line_items=[{
+            "amount": Decimal("600.00"),
+            "city_name": "上海",
+            "start_date": "2026-09-10",
+            "expense_type": "交通费",
+            "item_desc": "北京至上海高铁票"
+        }],
+        invoices=[{
+            "invoice_code": "01",
+            "invoice_number": "TR001",
+            "invoice_type": "铁路电子客票",
+            "total_amount": 600.00,
+            "departure_city": "北京",
+            "arrival_city": "上海",
+            "train_no": "G13",
+            "departure_time": None,
+            "arrival_time": None,
+            "raw_payload": {
+                "departure_city": "北京",
+                "arrival_city": "上海",
+                "train_no": "G13"
+            }
+        }]
+    )
+
+    result = await MasterOrchestrator.run(
+        task_id="task-train-e2e",
+        context=ctx
+    )
+
+    assert result.task_id == "task-train-e2e"
+    # 验证没有误报碰撞
+    rule_codes = {f.rule_code for f in result.verified_findings}
+    assert "R09_SPATIO_TEMPORAL_COLLISION" not in rule_codes
+    assert "R09_TRAVEL_DESTINATION_MISMATCH" not in rule_codes
+
+    # 验证执行结果
+    exec_map = {r.role: r for r in result.agent_execution_results}
+    assert exec_map[AgentRoleEnum.SUPPLIER].status == AgentExecutionStatus.SKIPPED
+    assert exec_map[AgentRoleEnum.SUPPLIER].reason == "NOT_APPLICABLE: DOCUMENT_TYPE_EXEMPT"
+    assert exec_map[AgentRoleEnum.ANOMALY].status == AgentExecutionStatus.SUCCESS
+
+
+

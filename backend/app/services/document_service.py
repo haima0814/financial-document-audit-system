@@ -197,9 +197,11 @@ class DocumentService:
                 issue_date=inv_in.issue_date,
                 invoice_hash=inv_in.invoice_hash,
                 raw_payload={
+                    **(inv_in.raw_payload or {}),
                     "bbox_positions": inv_in.bbox_positions or {},
                     "ocr_confidence": inv_in.ocr_confidence or 0.985,
-                    "file_path": file_path
+                    "file_path": file_path,
+                    **{k: getattr(inv_in, k) for k in ["departure_city", "arrival_city", "departure_time", "arrival_time", "train_no", "flight_no"] if getattr(inv_in, k, None) is not None}
                 }
             )
             self.db.add(inv_record)

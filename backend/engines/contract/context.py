@@ -37,6 +37,9 @@ class AuditExecutionContext(BaseModel):
     # 时空轨迹与行为上下文点 (差旅轨迹)
     spatio_points: List[Dict[str, Any]] = Field(default_factory=list, description="行程轨迹与时空事件点列表")
     
+    # 交通票据合法移动行程段
+    travel_segments: List[Dict[str, Any]] = Field(default_factory=list, description="交通票据行程移动段")
+    
     # 经办人画像与历史行为特征 (供 AnomalyAgent 查重、频率与异常突变推演)
     applicant_profile: Dict[str, Any] = Field(default_factory=dict, description="经办人岗位、职级、历史核销信誉与月度频次")
 

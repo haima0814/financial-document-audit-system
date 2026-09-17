@@ -337,6 +337,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
   min-width: 0;
   background: #ffffff;
   border-radius: 8px;
@@ -351,7 +352,7 @@ onUnmounted(() => {
   padding: 10px 14px;
   background: #f8fafc;
   border-bottom: 1px solid #e2e8f0;
-  flex-shrink: 0;
+  flex: 0 0 auto;
 }
 
 .header-left {
@@ -377,7 +378,8 @@ onUnmounted(() => {
 }
 
 .chat-messages {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 14px;
   overflow-y: auto;
   overflow-x: hidden;

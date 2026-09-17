@@ -5,10 +5,11 @@ Anomaly Agent 子图入口
 from typing import List, Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from engines.contract.finding import RiskFindingContract, AgentFindingList
-from .schemas import InvoiceFact, SpatioPoint
+from .schemas import InvoiceFact, SpatioPoint, TravelSegment
 from .hash_verifier import HashVerifier
 from .spatio_temporal import SpatioTemporalVerifier
 from .sequential_detector import SequentialDetector
+from .travel_verifier import TravelSegmentVerifier
 
 class AnomalyAgent:
     """异常行为与反欺诈智能体"""
@@ -19,6 +20,8 @@ class AnomalyAgent:
         document_id: int = 0,
         invoices: Optional[List[InvoiceFact]] = None,
         spatio_points: Optional[List[SpatioPoint]] = None,
+        travel_segments: Optional[List[TravelSegment]] = None,
+        line_items: Optional[List[Dict[str, Any]]] = None,
         historical_fingerprints: Optional[Dict[str, Dict[str, Any]]] = None,
         capabilities: Optional[List[str]] = None
     ) -> AgentFindingList:
@@ -29,11 +32,13 @@ class AnomalyAgent:
         3. 严格通过 capabilities 控制细粒度原子核验项：
            - duplicate_invoice_hash_check → 控制 R08
            - sequential_invoice_number_check → 控制 R10
-           - spatio_temporal_trajectory_conflict → 控制 R09
+           - spatio_temporal_trajectory_conflict → 控制 R09 (离散消费物理碰撞)
+           - travel_segment_consistency → 控制交通票据行程一致性核验
            - capabilities=None 时保持原有全量执行行为，向后兼容。
         """
         findings: List[RiskFindingContract] = []
         inv_list = invoices or []
+        seg_list = travel_segments or []
 
         # 1. Capabilities 门禁映射
         run_dup_check = (
@@ -44,6 +49,10 @@ class AnomalyAgent:
         run_spatio_check = (
             capabilities is None
             or "spatio_temporal_trajectory_conflict" in capabilities
+        )
+        run_travel_check = (
+            capabilities is None
+            or "travel_segment_consistency" in capabilities
         )
         run_seq_check = (
             capabilities is None
@@ -73,12 +82,21 @@ class AnomalyAgent:
             )
             findings.extend(dup_findings)
 
-        # 3. 时空物理碰撞检测 (R09)
+        # 3. 交通行程段一致性核验 (travel_segment_consistency)
+        if run_travel_check and seg_list:
+            travel_findings = TravelSegmentVerifier.verify_travel_consistency(
+                segments=seg_list,
+                line_items=line_items,
+                spatio_points=spatio_points
+            )
+            findings.extend(travel_findings)
+
+        # 4. 时空物理碰撞检测 (R09)
         if run_spatio_check and spatio_points and len(spatio_points) >= 2:
             st_findings = SpatioTemporalVerifier.detect_spatio_temporal_collisions(spatio_points)
             findings.extend(st_findings)
 
-        # 4. 连号发票拆单检测 (R10)
+        # 5. 连号发票拆单检测 (R10)
         if run_seq_check and len(inv_list) >= 2:
             seq_findings = SequentialDetector.detect_sequential_invoices(inv_list)
             findings.extend(seq_findings)
