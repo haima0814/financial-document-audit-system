@@ -55,17 +55,19 @@ class RiskFindingContract(BaseModel):
 class AgentFindingList(list):
     """
     智能体产出的风险发现项列表包装器 (继承原生 list，100% 兼容现有列表接口)
-    附带降级执行与来源元数据，供 AgentHarness 与主图裁决完整度 (DEGRADED)
+    附带降级执行、来源与能力级元数据，供 AgentHarness 与主图裁决完整度 (DEGRADED)
     """
     def __init__(
         self,
         items=None,
         is_degraded: bool = False,
         degraded_reason: Optional[str] = None,
-        source: Optional[str] = None
+        source: Optional[str] = None,
+        capability_results: Optional[List[Any]] = None
     ):
         super().__init__(items or [])
         self.is_degraded = is_degraded
         self.degraded_reason = degraded_reason
         self.source = source
+        self.capability_results = capability_results or []
 

@@ -25,7 +25,7 @@ from .events import (
 from .master_state import MasterAuditState
 from .settings import EngineSettings, ENGINE_CONFIG, engine_settings
 from .context import DocumentContext
-from .result import AuditResultDTO, AgentExecutionStatus, AgentExecutionResult
+from .result import AuditResultDTO, AgentExecutionStatus, AgentExecutionResult, CapabilityStatus, CapabilityExecutionResult
 from .event_bus import EventPublisher, InMemoryEventBus, event_bus
 
 __all__ = [
@@ -58,4 +58,7 @@ __all__ = [
     "EngineSettings",
     "ENGINE_CONFIG",
     "engine_settings",
+    # capability
+    "CapabilityStatus",
+    "CapabilityExecutionResult",
 ]

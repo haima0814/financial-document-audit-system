@@ -15,19 +15,16 @@ class TravelSegmentVerifier:
     """交通票据行程段一致性核验器"""
 
     @staticmethod
-    def verify_travel_consistency(
+    def verify_route_consistency(
         segments: List[TravelSegment],
-        line_items: Optional[List[Dict[str, Any]]] = None,
-        spatio_points: Optional[List[SpatioPoint]] = None
+        line_items: Optional[List[Dict[str, Any]]] = None
     ) -> List[RiskFindingContract]:
+        """核验 1：交通票起终点与报销申报城市一致性"""
         findings: List[RiskFindingContract] = []
         if not segments:
             return findings
 
         line_items = line_items or []
-        spatio_points = spatio_points or []
-
-        # 提取申报明细中的目的地城市集合
         claim_cities = set()
         for item in line_items:
             c = item.get("city_name")
@@ -35,7 +32,6 @@ class TravelSegmentVerifier:
                 geo = get_city_geo(c)
                 claim_cities.add(geo.short_name if geo else c)
 
-        # 1. 核验：交通票起终点与报销申报城市一致性
         if claim_cities:
             for seg in segments:
                 dep_geo = get_city_geo(seg.departure_city)
@@ -44,7 +40,6 @@ class TravelSegmentVerifier:
                 arr_name = arr_geo.short_name if arr_geo else seg.arrival_city
 
                 # 交通票的出发地或到达地必须至少有一个与申报明细中的城市匹配
-                # 否则说明车票目的地与本次出差申报目的地完全脱节
                 matched = any(
                     (c in dep_name or dep_name in c or c in arr_name or arr_name in c)
                     for c in claim_cities
@@ -69,9 +64,19 @@ class TravelSegmentVerifier:
                         suggestion="请核实交通票据是否属于本笔出差申请或补充行程变更说明。",
                         is_overridable=True
                     ))
+        return findings
 
-        # 2. 核验：行程日期与住宿日期冲突
-        # 如果住宿明细所在的城市与交通行程时间明显冲突
+    @staticmethod
+    def verify_date_consistency(
+        segments: List[TravelSegment],
+        line_items: Optional[List[Dict[str, Any]]] = None
+    ) -> List[RiskFindingContract]:
+        """核验 2：行程日期与住宿日期冲突"""
+        findings: List[RiskFindingContract] = []
+        if not segments:
+            return findings
+
+        line_items = line_items or []
         for item in line_items:
             exp_type = str(item.get("expense_type") or "")
             item_desc = str(item.get("item_desc") or "")
@@ -82,14 +87,12 @@ class TravelSegmentVerifier:
                     h_geo = get_city_geo(hotel_city)
                     h_name = h_geo.short_name if h_geo else hotel_city
                     for seg in segments:
-                        # 若交通票有到达日期或到达时间
                         t_date = None
                         if seg.arrival_time:
                             t_date = seg.arrival_time.strftime("%Y-%m-%d")
                         elif seg.travel_date:
                             t_date = seg.travel_date
                         
-                        # 若住宿城市是本次交通的到达城市，但住宿日期早于到达日期
                         if t_date and hotel_date_str < t_date:
                             arr_geo = get_city_geo(seg.arrival_city)
                             arr_name = arr_geo.short_name if arr_geo else seg.arrival_city
@@ -110,6 +113,19 @@ class TravelSegmentVerifier:
                                     suggestion="请核实实际行程日期与住宿发票开具日期是否一致。",
                                     is_overridable=True
                                 ))
+        return findings
+
+    @staticmethod
+    def verify_in_transit_collisions(
+        segments: List[TravelSegment],
+        spatio_points: Optional[List[SpatioPoint]] = None
+    ) -> List[RiskFindingContract]:
+        """核验 3 & 4：多段行程重叠与在途时间区间时空碰撞"""
+        findings: List[RiskFindingContract] = []
+        if not segments:
+            return findings
+
+        spatio_points = spatio_points or []
 
         # 3. 核验：多段车票是否存在时间重叠
         if len(segments) >= 2:
@@ -118,7 +134,6 @@ class TravelSegmentVerifier:
             for i in range(len(time_segments) - 1):
                 s1 = time_segments[i]
                 s2 = time_segments[i + 1]
-                # 段 2 出发时间早于段 1 到达时间
                 if s2.departure_time < s1.arrival_time:
                     findings.append(RiskFindingContract(
                         rule_code="R09_TRAVEL_SEGMENT_OVERLAP",
@@ -141,19 +156,16 @@ class TravelSegmentVerifier:
                         is_overridable=True
                     ))
 
-        # 4. 核验：离散消费事件点与合法交通路径明显矛盾 (同时间另一城市餐饮/消费)
-        # 例如：在车票运行区间内，在远距离另一城市发生离散消费
+        # 4. 核验：离散消费事件点与合法交通路径矛盾 (在途区间内异地消费)
         for seg in segments:
             if not seg.departure_time or not seg.arrival_time:
                 continue
             dep_geo = get_city_geo(seg.departure_city)
             arr_geo = get_city_geo(seg.arrival_city)
             for p in spatio_points:
-                # 检查点是否落在车票时间区间内
                 if seg.departure_time <= p.event_time <= seg.arrival_time:
                     dist_to_dep = SpatioTemporalVerifier.haversine_distance(p.latitude, p.longitude, dep_geo.latitude, dep_geo.longitude) if dep_geo else 999.0
                     dist_to_arr = SpatioTemporalVerifier.haversine_distance(p.latitude, p.longitude, arr_geo.latitude, arr_geo.longitude) if arr_geo else 999.0
-                    # 如果距离出发地和到达地均超过 100km，属于在列车行进途中在完全无关的第三地发生消费
                     if dist_to_dep >= 100.0 and dist_to_arr >= 100.0:
                         findings.append(RiskFindingContract(
                             rule_code="R09_SPATIO_TEMPORAL_COLLISION",
@@ -180,4 +192,17 @@ class TravelSegmentVerifier:
                             is_overridable=True
                         ))
 
+        return findings
+
+    @staticmethod
+    def verify_travel_consistency(
+        segments: List[TravelSegment],
+        line_items: Optional[List[Dict[str, Any]]] = None,
+        spatio_points: Optional[List[SpatioPoint]] = None
+    ) -> List[RiskFindingContract]:
+        """全量交通行程一致性核验入口 (保持向后兼容)"""
+        findings: List[RiskFindingContract] = []
+        findings.extend(TravelSegmentVerifier.verify_route_consistency(segments, line_items))
+        findings.extend(TravelSegmentVerifier.verify_date_consistency(segments, line_items))
+        findings.extend(TravelSegmentVerifier.verify_in_transit_collisions(segments, spatio_points))
         return findings

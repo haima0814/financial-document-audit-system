@@ -47,6 +47,7 @@ export const executionReasonMap = {
   'DATA_MISSING: SUPPLIER_IDENTITY_MISSING': '数据缺失：未提取到有效供应商身份信息',
   TRAVEL_SEGMENT_DETECTED: '检测到交通行程事实，执行路线与时空一致性核验',
   'PARTIAL: TRAVEL_TIME_MISSING': '部分核验：已识别交通路线，但缺少精确发到时刻',
+  'PARTIAL: TRAVEL_ARRIVAL_TIME_NOT_PROVIDED': '部分核验：原始凭证未提供到达时刻，未执行完整在途时间区间冲突核验',
   CORPORATE_PAYMENT_SUPPLIER_DILIGENCE: '执行对公供应商合规穿透与资质审查'
 }
 
@@ -208,6 +209,8 @@ export function normalizeAgentExecutions(fullReportPayload) {
       const durationMs = item.duration_ms ?? item.elapsed_ms
       const rawReason = item.reason || item.detail || '未提供执行说明'
       const formattedReason = formatExecutionReason(rawReason)
+      const capResults = Array.isArray(item.capability_results) ? item.capability_results : []
+      const hasPartialCaps = capResults.some(c => String(c.status).toUpperCase() === 'PARTIAL')
 
       normalized.push({
         id: `agent_exec_${i}`,
@@ -221,7 +224,9 @@ export function normalizeAgentExecutions(fullReportPayload) {
         reason: formattedReason,
         reason_cn: formattedReason,
         raw_reason: String(rawReason),
-        is_degraded: Boolean(item.is_degraded || status === 'DEGRADED')
+        is_degraded: Boolean(item.is_degraded || status === 'DEGRADED'),
+        capability_results: capResults,
+        has_partial_capabilities: hasPartialCaps
       })
     }
     return normalized
@@ -244,6 +249,8 @@ export function normalizeAgentExecutions(fullReportPayload) {
       const durationMs = item.duration_ms ?? item.elapsed_ms
       const rawReason = item.reason || item.detail || '未提供执行说明'
       const formattedReason = formatExecutionReason(rawReason)
+      const capResults = Array.isArray(item.capability_results) ? item.capability_results : []
+      const hasPartialCaps = capResults.some(c => String(c.status).toUpperCase() === 'PARTIAL')
 
       normalized.push({
         id: `agent_exec_${i}`,
@@ -257,7 +264,9 @@ export function normalizeAgentExecutions(fullReportPayload) {
         reason: formattedReason,
         reason_cn: formattedReason,
         raw_reason: String(rawReason),
-        is_degraded: Boolean(item.is_degraded || status === 'DEGRADED')
+        is_degraded: Boolean(item.is_degraded || status === 'DEGRADED'),
+        capability_results: capResults,
+        has_partial_capabilities: hasPartialCaps
       })
     }
     return normalized

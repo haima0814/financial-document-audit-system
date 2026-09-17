@@ -109,7 +109,13 @@ class AuditPlanner:
         if len(invoices) >= 2:
             anomaly_caps.append("sequential_invoice_number_check")
         if len(travel_segments) >= 1:
-            anomaly_caps.append("travel_segment_consistency")
+            anomaly_caps.extend([
+                "travel_route_consistency",
+                "travel_date_consistency",
+                "departure_time_check",
+                "in_transit_collision_check",
+                "travel_segment_consistency"
+            ])
         if len(spatio_points) >= 2:
             anomaly_caps.append("spatio_temporal_trajectory_conflict")
 

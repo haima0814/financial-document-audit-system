@@ -154,6 +154,15 @@ class AgentHarness:
         is_degraded = getattr(raw_findings, "is_degraded", False)
         degraded_reason = getattr(raw_findings, "degraded_reason", None)
         source = getattr(raw_findings, "source", None)
+        capability_results = getattr(raw_findings, "capability_results", [])
+
+        # 检查能力级结果中是否存在 mandatory 为 BLOCKED 或 FAILED 的能力
+        has_blocked_mandatory = any(
+            getattr(c, "mandatory", True) and str(getattr(c, "status", "")).upper() in ("BLOCKED", "FAILED", "CAPABILITYSTATUS.BLOCKED", "CAPABILITYSTATUS.FAILED")
+            for c in capability_results
+        )
+        if has_blocked_mandatory:
+            is_degraded = True
 
         if not is_degraded:
             for f in validated_findings:
@@ -166,7 +175,7 @@ class AgentHarness:
         if source is None:
             source = "HEURISTIC_RULE" if is_degraded else ("DETERMINISTIC_RULE" if agent_role == AgentRoleEnum.AMOUNT else "LLM_INFERENCE")
 
-        reason = degraded_reason if is_degraded else "执行成功"
+        reason = degraded_reason if degraded_reason else ("降级完成" if is_degraded else "执行成功")
         status = AgentExecutionStatus.DEGRADED if is_degraded else AgentExecutionStatus.SUCCESS
 
         return AgentExecutionResult(
@@ -177,5 +186,6 @@ class AgentHarness:
             duration_ms=elapsed_ms,
             capabilities_run=capabilities or [],
             source=source,
-            is_degraded=is_degraded
+            is_degraded=is_degraded,
+            capability_results=capability_results
         )

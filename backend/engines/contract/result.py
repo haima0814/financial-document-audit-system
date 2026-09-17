@@ -12,6 +12,24 @@ from pydantic import BaseModel, Field, ConfigDict
 from .agent_role import AgentRoleEnum
 from .finding import RiskFindingContract
 
+class CapabilityStatus(str, Enum):
+    """能力级执行状态"""
+    VERIFIED = "VERIFIED"               # 要素完备，能力已完全核验
+    PARTIAL = "PARTIAL"                 # 核心要素完备已核验，增强要素缺失（能力受限）
+    NOT_APPLICABLE = "NOT_APPLICABLE"   # 当前单据/凭证无此项事实，合理不适用
+    BLOCKED = "BLOCKED"                 # 核心必要要素缺失，无法执行核验
+    FAILED = "FAILED"                   # 执行异常或失败
+
+class CapabilityExecutionResult(BaseModel):
+    """单个原子能力执行结果契约"""
+    model_config = ConfigDict(frozen=True)
+
+    capability: str = Field(..., description="能力标识，如 travel_route_consistency")
+    status: CapabilityStatus = Field(..., description="执行状态: VERIFIED / PARTIAL / NOT_APPLICABLE / BLOCKED / FAILED")
+    mandatory: bool = Field(default=True, description="是否为当前场景下的核心必要能力")
+    reason: Optional[str] = Field(default=None, description="能力执行说明或受限原因")
+    missing_fields: List[str] = Field(default_factory=list, description="缺失的要素字段列表")
+
 class AgentExecutionStatus(str, Enum):
     """智能体执行状态"""
     PLANNED = "PLANNED"       # 规划初态（已规划待执行）
@@ -33,6 +51,7 @@ class AgentExecutionResult(BaseModel):
     capabilities_run: List[str] = Field(default_factory=list, description="实际启用的能力项")
     source: Optional[str] = Field(default=None, description="执行数据源/模式: LLM_INFERENCE / HEURISTIC_RULE / DETERMINISTIC_RULE")
     is_degraded: bool = Field(default=False, description="是否为降级审核 (如 LLM 不可用退化为启发式规则)")
+    capability_results: List[CapabilityExecutionResult] = Field(default_factory=list, description="细粒度能力级执行结果明细")
 
 class AuditResultDTO(BaseModel):
     """

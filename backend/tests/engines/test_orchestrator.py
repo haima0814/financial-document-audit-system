@@ -851,5 +851,483 @@ async def test_audit_context_builder_xian_coordinates(setup_test_db):
         assert pt["latitude"] != 31.2304
 
 
+@pytest.mark.asyncio
+async def test_capability_level_train_ticket_d3233_auto_approve(monkeypatch):
+    """
+    回归用例 1 (老式铁路票 D3233 场景):
+    - 单张车票金额 54 元，仅缺失 arrival_time
+    - in_transit_collision_check 为 PARTIAL (optional/enhanced 能力)
+    - 核心必要能力 (travel_route_consistency, travel_date_consistency, departure_time_check) 为 VERIFIED
+    - AnomalyAgent 状态为 SUCCESS (is_degraded=False)
+    - 全局 AuditCompleteness 为 COMPLETE
+    - LOW + <=500 元可自动免审直通 AUTO_APPROVE
+    """
+    from engines.contract.context import DocumentContext
+    from engines.contract.agent_role import AgentRoleEnum
+    from engines.contract.result import AgentExecutionStatus, CapabilityStatus
+    from app.models.document import FinancialDocument
+    from app.models.audit import ReviewReport
+    from app.services.approval_engine import ApprovalEngine, ApprovalDecisionAction
+    from app.core.llm_client import LLMClient
+
+    async def mock_rationality(*args, **kwargs):
+        return {"is_rational": True, "source": "LLM_INFERENCE", "risk_analysis": "正常差旅"}
+    monkeypatch.setattr(LLMClient, "audit_policy_rationality", mock_rationality)
+
+    ctx = DocumentContext(
+        document_id=701,
+        document_no="TRV-D3233-001",
+        document_type="TRAVEL_REIMBURSEMENT",
+        applicant_id=1,
+        tenant_id=1,
+        total_amount=Decimal("54.00"),
+        title="差旅报销-D3233动车票",
+        line_items=[{
+            "amount": Decimal("54.00"),
+            "city_name": "上海",
+            "start_date": "2026-09-10",
+            "expense_type": "交通费",
+            "item_desc": "D3233车票"
+        }],
+        invoices=[{
+            "invoice_code": "01",
+            "invoice_number": "D3233_001",
+            "invoice_type": "铁路电子客票",
+            "total_amount": 54.00,
+            "departure_city": "北京",
+            "arrival_city": "上海",
+            "train_no": "D3233",
+            "travel_date": "2026-09-10",
+            "departure_time": datetime(2026, 9, 10, 8, 0),
+            "arrival_time": None,
+            "raw_payload": {
+                "departure_city": "北京",
+                "arrival_city": "上海",
+                "train_no": "D3233",
+                "travel_date": "2026-09-10",
+                "departure_time": "2026-09-10 08:00"
+            }
+        }]
+    )
+
+    result = await MasterOrchestrator.run(
+        task_id="task-d3233-test",
+        context=ctx
+    )
+
+    exec_map = {r.role: r for r in result.agent_execution_results}
+    anomaly_res = exec_map[AgentRoleEnum.ANOMALY]
+
+    # 1. 验证 AnomalyAgent 状态为 SUCCESS (非 DEGRADED)
+    assert anomaly_res.status == AgentExecutionStatus.SUCCESS
+    assert anomaly_res.is_degraded is False
+    assert "能力受限" in anomaly_res.reason
+
+    # 2. 验证细粒度能力结果
+    cap_map = {c.capability: c for c in anomaly_res.capability_results}
+    assert cap_map["travel_route_consistency"].status == CapabilityStatus.VERIFIED
+    assert cap_map["travel_date_consistency"].status == CapabilityStatus.VERIFIED
+    assert cap_map["departure_time_check"].status == CapabilityStatus.VERIFIED
+    assert cap_map["in_transit_collision_check"].status == CapabilityStatus.PARTIAL
+    assert cap_map["in_transit_collision_check"].mandatory is False
+    assert "arrival_time" in cap_map["in_transit_collision_check"].missing_fields
+
+    # 3. 验证全局完整度保持 COMPLETE
+    assert result.audit_completeness == "COMPLETE"
+    assert result.overall_risk_level == "low"
+    assert result.final_score == 100
+
+    # 4. 验证审批引擎裁决：小额低危 + COMPLETE -> AUTO_APPROVE
+    doc = FinancialDocument(id=701, total_amount=Decimal("54.00"))
+    report = ReviewReport(
+        task_id="task-d3233-test",
+        document_id=701,
+        overall_risk_level="low",
+        final_score=100,
+        full_report_payload={"audit_completeness": result.audit_completeness}
+    )
+    decision = await ApprovalEngine.evaluate_transition(doc, report)
+    assert decision.action == ApprovalDecisionAction.AUTO_APPROVE
+    assert decision.target_state == "APPROVED"
+
+
+@pytest.mark.asyncio
+async def test_capability_level_train_ticket_missing_departure_time(monkeypatch):
+    """
+    回归用例 2 (同一铁路票缺 departure_time):
+    - mandatory capability departure_time_check 判定为 BLOCKED
+    - AnomalyAgent 状态为 DEGRADED
+    - 全局 AuditCompleteness 为 DEGRADED
+    - ApprovalEngine 判定为 MANUAL_REVIEW (严格 Fail-Closed)
+    """
+    from engines.contract.context import DocumentContext
+    from engines.contract.agent_role import AgentRoleEnum
+    from engines.contract.result import AgentExecutionStatus, CapabilityStatus
+    from app.models.document import FinancialDocument
+    from app.models.audit import ReviewReport
+    from app.services.approval_engine import ApprovalEngine, ApprovalDecisionAction
+    from app.core.llm_client import LLMClient
+
+    async def mock_rationality(*args, **kwargs):
+        return {"is_rational": True, "source": "LLM_INFERENCE", "risk_analysis": "正常差旅"}
+    monkeypatch.setattr(LLMClient, "audit_policy_rationality", mock_rationality)
+
+    ctx = DocumentContext(
+        document_id=702,
+        document_no="TRV-D3233-002",
+        document_type="TRAVEL_REIMBURSEMENT",
+        applicant_id=1,
+        tenant_id=1,
+        total_amount=Decimal("54.00"),
+        title="差旅报销-缺出发时刻",
+        line_items=[{
+            "amount": Decimal("54.00"),
+            "city_name": "上海",
+            "start_date": "2026-09-10",
+            "expense_type": "交通费"
+        }],
+        invoices=[{
+            "invoice_code": "01",
+            "invoice_number": "D3233_002",
+            "invoice_type": "铁路电子客票",
+            "total_amount": 54.00,
+            "departure_city": "北京",
+            "arrival_city": "上海",
+            "travel_date": "2026-09-10",
+            "departure_time": None,
+            "arrival_time": None
+        }]
+    )
+
+    result = await MasterOrchestrator.run(
+        task_id="task-d3233-no-dep",
+        context=ctx
+    )
+
+    exec_map = {r.role: r for r in result.agent_execution_results}
+    anomaly_res = exec_map[AgentRoleEnum.ANOMALY]
+
+    assert anomaly_res.status == AgentExecutionStatus.DEGRADED
+    assert anomaly_res.is_degraded is True
+    assert result.audit_completeness == "DEGRADED"
+
+    cap_map = {c.capability: c for c in anomaly_res.capability_results}
+    assert cap_map["departure_time_check"].status == CapabilityStatus.BLOCKED
+    assert cap_map["departure_time_check"].mandatory is True
+
+    doc = FinancialDocument(id=702, total_amount=Decimal("54.00"))
+    report = ReviewReport(
+        task_id="task-d3233-no-dep",
+        document_id=702,
+        overall_risk_level="low",
+        final_score=100,
+        full_report_payload={"audit_completeness": result.audit_completeness}
+    )
+    decision = await ApprovalEngine.evaluate_transition(doc, report)
+    assert decision.action == ApprovalDecisionAction.MANUAL_REVIEW
+
+
+@pytest.mark.asyncio
+async def test_capability_level_train_ticket_missing_route(monkeypatch):
+    """
+    回归用例 3 (缺 departure/arrival city):
+    - travel_route_consistency 为 BLOCKED (mandatory)
+    - AnomalyAgent 状态为 DEGRADED
+    - 全局完整度 DEGRADED，转 MANUAL_REVIEW
+    """
+    from engines.contract.context import DocumentContext
+    from engines.contract.agent_role import AgentRoleEnum
+    from engines.contract.result import AgentExecutionStatus, CapabilityStatus
+    from app.models.document import FinancialDocument
+    from app.models.audit import ReviewReport
+    from app.services.approval_engine import ApprovalEngine, ApprovalDecisionAction
+    from app.core.llm_client import LLMClient
+
+    async def mock_rationality(*args, **kwargs):
+        return {"is_rational": True, "source": "LLM_INFERENCE", "risk_analysis": "正常差旅"}
+    monkeypatch.setattr(LLMClient, "audit_policy_rationality", mock_rationality)
+
+    ctx = DocumentContext(
+        document_id=703,
+        document_no="TRV-D3233-003",
+        document_type="TRAVEL_REIMBURSEMENT",
+        applicant_id=1,
+        tenant_id=1,
+        total_amount=Decimal("54.00"),
+        title="差旅报销-缺起止城市",
+        line_items=[{
+            "amount": Decimal("54.00"),
+            "city_name": "上海",
+            "start_date": "2026-09-10",
+            "expense_type": "交通费"
+        }],
+        invoices=[{
+            "invoice_code": "01",
+            "invoice_number": "D3233_003",
+            "invoice_type": "铁路电子客票",
+            "total_amount": 54.00,
+            "departure_city": "",
+            "arrival_city": "",
+            "travel_date": "2026-09-10",
+            "departure_time": datetime(2026, 9, 10, 8, 0),
+            "arrival_time": None
+        }]
+    )
+
+    result = await MasterOrchestrator.run(
+        task_id="task-d3233-no-route",
+        context=ctx
+    )
+
+    exec_map = {r.role: r for r in result.agent_execution_results}
+    anomaly_res = exec_map[AgentRoleEnum.ANOMALY]
+
+    assert anomaly_res.status == AgentExecutionStatus.DEGRADED
+    cap_map = {c.capability: c for c in anomaly_res.capability_results}
+    assert cap_map["travel_route_consistency"].status == CapabilityStatus.BLOCKED
+    assert result.audit_completeness == "DEGRADED"
+
+    doc = FinancialDocument(id=703, total_amount=Decimal("54.00"))
+    report = ReviewReport(
+        task_id="task-d3233-no-route",
+        document_id=703,
+        overall_risk_level="low",
+        final_score=100,
+        full_report_payload={"audit_completeness": result.audit_completeness}
+    )
+    decision = await ApprovalEngine.evaluate_transition(doc, report)
+    assert decision.action == ApprovalDecisionAction.MANUAL_REVIEW
+
+
+@pytest.mark.asyncio
+async def test_capability_level_train_ticket_full_times(monkeypatch):
+    """
+    回归用例 4 (有完整到达时间):
+    - 所有适用 capability 为 VERIFIED
+    - AnomalyAgent 状态为 SUCCESS (无任何 limitation)
+    - AuditCompleteness 为 COMPLETE
+    """
+    from engines.contract.context import DocumentContext
+    from engines.contract.agent_role import AgentRoleEnum
+    from engines.contract.result import AgentExecutionStatus, CapabilityStatus
+    from app.core.llm_client import LLMClient
+
+    async def mock_rationality(*args, **kwargs):
+        return {"is_rational": True, "source": "LLM_INFERENCE", "risk_analysis": "正常差旅"}
+    monkeypatch.setattr(LLMClient, "audit_policy_rationality", mock_rationality)
+
+    ctx = DocumentContext(
+        document_id=704,
+        document_no="TRV-D3233-004",
+        document_type="TRAVEL_REIMBURSEMENT",
+        applicant_id=1,
+        tenant_id=1,
+        total_amount=Decimal("54.00"),
+        title="差旅报销-全时间具备",
+        line_items=[{
+            "amount": Decimal("54.00"),
+            "city_name": "上海",
+            "start_date": "2026-09-10",
+            "expense_type": "交通费"
+        }],
+        invoices=[{
+            "invoice_code": "01",
+            "invoice_number": "D3233_004",
+            "invoice_type": "铁路电子客票",
+            "total_amount": 54.00,
+            "departure_city": "北京",
+            "arrival_city": "上海",
+            "travel_date": "2026-09-10",
+            "departure_time": datetime(2026, 9, 10, 8, 0),
+            "arrival_time": datetime(2026, 9, 10, 12, 30)
+        }]
+    )
+
+    result = await MasterOrchestrator.run(
+        task_id="task-d3233-full-times",
+        context=ctx
+    )
+
+    exec_map = {r.role: r for r in result.agent_execution_results}
+    anomaly_res = exec_map[AgentRoleEnum.ANOMALY]
+
+    assert anomaly_res.status == AgentExecutionStatus.SUCCESS
+    assert anomaly_res.is_degraded is False
+    cap_map = {c.capability: c for c in anomaly_res.capability_results}
+    assert cap_map["in_transit_collision_check"].status == CapabilityStatus.VERIFIED
+    assert result.audit_completeness == "COMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_capability_level_flight_missing_arrival_time(monkeypatch):
+    """
+    回归用例 5 (飞机票缺实际到达时刻):
+    - 同样走 PARTIAL，而不是增加 flight 特判
+    - AnomalyAgent 状态为 SUCCESS (is_degraded=False)
+    - AuditCompleteness 为 COMPLETE
+    """
+    from engines.contract.context import DocumentContext
+    from engines.contract.agent_role import AgentRoleEnum
+    from engines.contract.result import AgentExecutionStatus, CapabilityStatus
+    from app.core.llm_client import LLMClient
+
+    async def mock_rationality(*args, **kwargs):
+        return {"is_rational": True, "source": "LLM_INFERENCE", "risk_analysis": "正常差旅"}
+    monkeypatch.setattr(LLMClient, "audit_policy_rationality", mock_rationality)
+
+    ctx = DocumentContext(
+        document_id=705,
+        document_no="TRV-FLIGHT-001",
+        document_type="TRAVEL_REIMBURSEMENT",
+        applicant_id=1,
+        tenant_id=1,
+        total_amount=Decimal("1200.00"),
+        title="差旅报销-机票行程单",
+        line_items=[{
+            "amount": Decimal("1200.00"),
+            "city_name": "成都",
+            "start_date": "2026-09-15",
+            "expense_type": "交通费"
+        }],
+        invoices=[{
+            "invoice_code": "01",
+            "invoice_number": "CA1405",
+            "invoice_type": "航空运输电子客票行程单",
+            "total_amount": 1200.00,
+            "departure_city": "北京",
+            "arrival_city": "成都",
+            "travel_date": "2026-09-15",
+            "departure_time": datetime(2026, 9, 15, 9, 0),
+            "arrival_time": None
+        }]
+    )
+
+    result = await MasterOrchestrator.run(
+        task_id="task-flight-test",
+        context=ctx
+    )
+
+    exec_map = {r.role: r for r in result.agent_execution_results}
+    anomaly_res = exec_map[AgentRoleEnum.ANOMALY]
+
+    assert anomaly_res.status == AgentExecutionStatus.SUCCESS
+    assert anomaly_res.is_degraded is False
+    cap_map = {c.capability: c for c in anomaly_res.capability_results}
+    assert cap_map["travel_route_consistency"].status == CapabilityStatus.VERIFIED
+    assert cap_map["departure_time_check"].status == CapabilityStatus.VERIFIED
+    assert cap_map["in_transit_collision_check"].status == CapabilityStatus.PARTIAL
+    assert result.audit_completeness == "COMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_capability_level_taxi_missing_arrival_time(monkeypatch):
+    """
+    回归用例 6 (出租车只有开始时间、无结束时间):
+    - 根据 capability policy 得到 PARTIAL
+    - AnomalyAgent 状态为 SUCCESS (is_degraded=False)
+    - AuditCompleteness 为 COMPLETE
+    """
+    from engines.contract.context import DocumentContext
+    from engines.contract.agent_role import AgentRoleEnum
+    from engines.contract.result import AgentExecutionStatus, CapabilityStatus
+    from app.core.llm_client import LLMClient
+
+    async def mock_rationality(*args, **kwargs):
+        return {"is_rational": True, "source": "LLM_INFERENCE", "risk_analysis": "正常市内交通"}
+    monkeypatch.setattr(LLMClient, "audit_policy_rationality", mock_rationality)
+
+    ctx = DocumentContext(
+        document_id=706,
+        document_no="TRV-TAXI-001",
+        document_type="TRAVEL_REIMBURSEMENT",
+        applicant_id=1,
+        tenant_id=1,
+        total_amount=Decimal("45.00"),
+        title="差旅报销-出租车费",
+        line_items=[{
+            "amount": Decimal("45.00"),
+            "city_name": "北京",
+            "start_date": "2026-09-10",
+            "expense_type": "市内交通费"
+        }],
+        invoices=[{
+            "invoice_code": "01",
+            "invoice_number": "TAXI-888",
+            "invoice_type": "出租车发票",
+            "total_amount": 45.00,
+            "departure_city": "北京",
+            "arrival_city": "北京",
+            "travel_date": "2026-09-10",
+            "departure_time": datetime(2026, 9, 10, 14, 0),
+            "arrival_time": None
+        }]
+    )
+
+    result = await MasterOrchestrator.run(
+        task_id="task-taxi-test",
+        context=ctx
+    )
+
+    exec_map = {r.role: r for r in result.agent_execution_results}
+    anomaly_res = exec_map[AgentRoleEnum.ANOMALY]
+
+    assert anomaly_res.status == AgentExecutionStatus.SUCCESS
+    assert anomaly_res.is_degraded is False
+    cap_map = {c.capability: c for c in anomaly_res.capability_results}
+    assert cap_map["in_transit_collision_check"].status == CapabilityStatus.PARTIAL
+    assert result.audit_completeness == "COMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_capability_level_non_travel_expense(monkeypatch):
+    """
+    回归用例 7 (非差旅报销):
+    - 无交通行程段事实
+    - 交通类 capability 为 NOT_APPLICABLE
+    - Amount/Policy/Supplier 行为不改变
+    - AuditCompleteness 为 COMPLETE
+    """
+    from engines.contract.context import DocumentContext
+    from engines.contract.agent_role import AgentRoleEnum
+    from engines.contract.result import AgentExecutionStatus, CapabilityStatus
+    from app.core.llm_client import LLMClient
+
+    async def mock_rationality(*args, **kwargs):
+        return {"is_rational": True, "source": "LLM_INFERENCE", "risk_analysis": "正常办公耗材采购"}
+    monkeypatch.setattr(LLMClient, "audit_policy_rationality", mock_rationality)
+
+    ctx = DocumentContext(
+        document_id=707,
+        document_no="GEN-OFFICE-001",
+        document_type="GENERAL_EXPENSE",
+        applicant_id=1,
+        tenant_id=1,
+        total_amount=Decimal("300.00"),
+        title="日常办公耗材采购",
+        line_items=[{
+            "amount": Decimal("300.00"),
+            "expense_type": "办公用品",
+            "item_desc": "复印纸与打印机硒鼓"
+        }],
+        invoices=[{
+            "invoice_code": "011002000111",
+            "invoice_number": "88776655",
+            "invoice_type": "增值税普通发票",
+            "total_amount": 300.00
+        }]
+    )
+
+    result = await MasterOrchestrator.run(
+        task_id="task-general-test",
+        context=ctx
+    )
+
+    exec_map = {r.role: r for r in result.agent_execution_results}
+    assert exec_map[AgentRoleEnum.AMOUNT].status == AgentExecutionStatus.SUCCESS
+    assert exec_map[AgentRoleEnum.POLICY].status == AgentExecutionStatus.SUCCESS
+    assert exec_map[AgentRoleEnum.ANOMALY].status == AgentExecutionStatus.SUCCESS
+    assert result.audit_completeness == "COMPLETE"
+
+
 
 

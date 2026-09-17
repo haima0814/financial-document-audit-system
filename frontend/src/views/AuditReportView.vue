@@ -318,6 +318,9 @@
             <el-table-column prop="reason_cn" label="判定依据 / 降级说明" min-width="280">
               <template #default="{ row }">
                 <div class="reason-cell">
+                  <div v-if="row.has_partial_capabilities" class="cap-warning-badge" style="margin-bottom: 4px;">
+                    <el-tag size="small" type="warning" effect="plain">部分能力受限</el-tag>
+                  </div>
                   <el-tooltip :content="`底层标识: ${row.raw_reason}`" placement="top">
                     <span class="reason-text">
                       <span v-if="!expandedRows.has(row.id) && (row.reason_cn && row.reason_cn.length > 60)">

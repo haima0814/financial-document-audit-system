@@ -115,10 +115,11 @@ class MasterOrchestrator:
             )
             real_travel_date_str = str(real_travel_date).strip() if real_travel_date else None
 
-            if dep_city and arr_city:
+            is_travel_inv = any(kw in inv_type for kw in ["铁路", "火车", "航空", "机票", "客票", "行程单", "出租车", "打车", "网约车", "交通"])
+            if dep_city or arr_city or is_travel_inv:
                 segments.append({
-                    "departure_city": dep_city,
-                    "arrival_city": arr_city,
+                    "departure_city": dep_city or "",
+                    "arrival_city": arr_city or "",
                     "departure_time": dep_time, # 严格保持原样，缺时间为 None，严禁猜测
                     "arrival_time": arr_time,   # 严格保持原样，缺时间为 None，严禁猜测
                     "travel_date": real_travel_date_str, # 真实乘车日期；缺失时为 None，禁止使用 issue_date
@@ -126,7 +127,7 @@ class MasterOrchestrator:
                     "transport_no": train_no,
                     "attachment_id": inv.get("attachment_id", 1),
                     "invoice_number": inv.get("invoice_number", ""),
-                    "source_desc": f"{train_no or '交通凭证'}: {dep_city} -> {arr_city}"
+                    "source_desc": f"{train_no or '交通凭证'}: {dep_city or '未知'} -> {arr_city or '未知'}"
                 })
         return segments
 
