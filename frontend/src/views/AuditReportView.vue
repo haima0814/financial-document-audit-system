@@ -25,7 +25,7 @@
         <div class="banner-top-row">
           <div class="score-card">
             <div class="score-number" :class="getScoreClass(report.final_score)">
-              {{ report.final_score ?? 100 }}
+              {{ report.final_score ?? '--' }}
             </div>
             <div class="score-meta">
               <div class="score-title">智能风控综合体检评分</div>
@@ -50,9 +50,9 @@
               {{ report.summary || '经多智能体联合核查，各项数据核验完毕。' }}
             </div>
             <div class="risk-counters">
-              <span class="counter-item text-danger">高危红线: <strong>{{ report.high_risks_count || 0 }}</strong> 项</span>
-              <span class="counter-item text-warning">中危合规: <strong>{{ report.medium_risks_count || 0 }}</strong> 项</span>
-              <span class="counter-item text-info">低危提示: <strong>{{ report.low_risks_count || 0 }}</strong> 项</span>
+              <span class="counter-item" :class="report.high_risks_count != null ? 'text-danger' : 'text-muted'">高危红线: <strong>{{ report.high_risks_count ?? '--' }}</strong> 项</span>
+              <span class="counter-item" :class="report.medium_risks_count != null ? 'text-warning' : 'text-muted'">中危合规: <strong>{{ report.medium_risks_count ?? '--' }}</strong> 项</span>
+              <span class="counter-item" :class="report.low_risks_count != null ? 'text-info' : 'text-muted'">低危提示: <strong>{{ report.low_risks_count ?? '--' }}</strong> 项</span>
             </div>
           </div>
 
@@ -390,25 +390,11 @@ const auditCompleteness = computed(() => {
   return payload.audit_completeness || 'UNKNOWN'
 })
 
-// 审批决策
+// 审批决策 (严格仅使用后端 full_report_payload.approval_decision.action，严禁前端自行推导)
 const decisionAction = computed(() => {
-  if (!report.value) return ''
+  if (!report.value) return 'UNKNOWN'
   const payload = report.value.full_report_payload || {}
-  if (payload.approval_decision?.action) {
-    return payload.approval_decision.action
-  }
-  // 兜底推导
-  if (report.value.overall_risk_level === 'high') {
-    const hasVeto = (report.value.findings || []).some(f => f.risk_level === 'high' && f.is_overridable === false)
-    return hasVeto ? 'REJECT' : 'MANUAL_REVIEW'
-  }
-  if (auditCompleteness.value !== 'COMPLETE') {
-    return 'MANUAL_REVIEW'
-  }
-  if (report.value.final_score >= 90 && auditCompleteness.value === 'COMPLETE') {
-    return 'AUTO_APPROVE'
-  }
-  return 'MANUAL_REVIEW'
+  return payload.approval_decision?.action || 'UNKNOWN'
 })
 
 const decisionReason = computed(() => {
@@ -539,8 +525,10 @@ const handleCitationSelect = (citation) => {
 }
 
 const getScoreClass = (score) => {
-  if (score >= 90) return 'score-green'
-  if (score >= 60) return 'score-yellow'
+  if (score == null || score === '' || score === '--' || isNaN(Number(score))) return 'score-neutral'
+  const num = Number(score)
+  if (num >= 90) return 'score-green'
+  if (num >= 60) return 'score-yellow'
   return 'score-red'
 }
 
@@ -649,6 +637,7 @@ onMounted(() => {
 .score-green { color: #16a34a; }
 .score-yellow { color: #d97706; }
 .score-red { color: #dc2626; }
+.score-neutral { color: #64748b; }
 
 .score-meta {
   display: flex;

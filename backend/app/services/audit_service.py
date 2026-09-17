@@ -362,7 +362,7 @@ class AuditService:
         验证当前用户是否有权访问该单据的风控审查上下文：
         1. ADMIN 或 超级用户: 拥有全量数据访问权限；
         2. 单据经办人本人 (applicant_id == user_id): 拥有访问权限；
-        3. CFO: 金额 >= 10,000 或 非草稿单据 (处于审核/审批/办结状态)；
+        3. CFO: 金额 >= 10,000 或 判定为高危 (overall_risk_level == 'high') 的单据 或 本人单据；
         4. FINANCE: 所有非草稿单据 (status != 'DRAFT')；
         5. MANAGER: 本部门非草稿单据 (department_name == user.department_name)；
         6. 其他 (普通员工): 严禁跨越访问他人单据。
@@ -373,8 +373,6 @@ class AuditService:
             return True
         if "CFO" in roles:
             if doc.total_amount and doc.total_amount >= 10000:
-                return True
-            if doc.status != "DRAFT":
                 return True
             report = await self.get_report_by_document(doc.id)
             if report and report.overall_risk_level == "high":

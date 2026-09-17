@@ -60,7 +60,11 @@ async def setup_db():
     await test_engine.dispose()
 
 
-async def create_test_doc_and_report(user_id: int = 10):
+async def create_test_doc_and_report(
+    user_id: int = 10,
+    total_amount: float = 1500.0,
+    overall_risk_level: str = "medium"
+):
     """助手函数：创建已具备体检报告与风险项的测试单据"""
     import uuid
     async with test_session_maker() as session:
@@ -70,7 +74,7 @@ async def create_test_doc_and_report(user_id: int = 10):
             document_type="TRAVEL_EXPENSE",
             applicant_id=user_id,
             department_name="研发部",
-            total_amount=1500.0,
+            total_amount=total_amount,
             currency="CNY",
             status="IN_REVIEW"
         )
@@ -87,13 +91,14 @@ async def create_test_doc_and_report(user_id: int = 10):
         session.add(task)
         await session.flush()
 
+        is_high = overall_risk_level == "high"
         report = ReviewReport(
             task_id=task.task_id,
             document_id=doc.id,
-            final_score=75,
-            overall_risk_level="medium",
-            high_risks_count=0,
-            medium_risks_count=1,
+            final_score=45 if is_high else 75,
+            overall_risk_level=overall_risk_level,
+            high_risks_count=1 if is_high else 0,
+            medium_risks_count=0 if is_high else 1,
             low_risks_count=0,
             summary="检出差旅住宿费超标风险项",
             full_report_payload={"audit_completeness": "COMPLETE"}
@@ -329,3 +334,84 @@ async def test_original_chat_endpoint_remains_functional():
         data2 = resp2.json()
         assert data2["session_id"] == sess_id
         assert data2["message"]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_cfo_document_rbac_access_scope():
+    """
+    测试点 6: CFO 访问权限与 DocumentService.query_documents() 一致：
+    本人 OR amount>=10000 OR high-risk 报告。
+    - CFO 访问他人普通低金额非高危单据 -> 403
+    - CFO 访问他人金额 >= 10000 单据 -> 200
+    - CFO 访问他人低金额但高危 (high-risk) 单据 -> 200
+    """
+    token_cfo = AuthService.create_access_token(user_id=2, username="cfo_user", roles=["CFO"])
+    headers_cfo = {"Authorization": f"Bearer {token_cfo}"}
+
+    # 1. 他人普通低金额 (1500 < 10000) 非高危 (medium) 单据
+    doc_id_low_med = await create_test_doc_and_report(user_id=10, total_amount=1500.0, overall_risk_level="medium")
+
+    # 2. 他人高金额 (12000 >= 10000) 非高危 单据
+    doc_id_high_amt = await create_test_doc_and_report(user_id=10, total_amount=12000.0, overall_risk_level="medium")
+
+    # 3. 他人低金额 (800 < 10000) 但高危 (high) 单据
+    doc_id_high_risk = await create_test_doc_and_report(user_id=10, total_amount=800.0, overall_risk_level="high")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # CFO 访问他人低金额非高危 -> 403 拒绝
+        resp_low_med = await ac.post(
+            "/api/v1/audits/chat",
+            json={"document_id": doc_id_low_med, "message": "查看低金额非高危单据"},
+            headers=headers_cfo
+        )
+        assert resp_low_med.status_code == 403
+
+        # CFO 访问大额单据 (>=10000) -> 200 放行
+        resp_high_amt = await ac.post(
+            "/api/v1/audits/chat",
+            json={"document_id": doc_id_high_amt, "message": "查看大额单据风控"},
+            headers=headers_cfo
+        )
+        assert resp_high_amt.status_code == 200
+
+        # CFO 访问高危单据 (high-risk) -> 200 放行
+        resp_high_risk = await ac.post(
+            "/api/v1/audits/chat",
+            json={"document_id": doc_id_high_risk, "message": "查看高危单据风控"},
+            headers=headers_cfo
+        )
+        assert resp_high_risk.status_code == 200
+
+
+def test_formatters_fail_closed_contract():
+    """
+    测试点 7: 前端格式化层与状态机兜底契约：
+    - Agent status 缺失 -> UNKNOWN
+    - Agent reason 缺失 -> 未提供执行说明
+    - approval_decision 缺失 -> UNKNOWN / 审批决策待确认
+    """
+    import subprocess
+    code = """
+    import('./frontend/src/utils/auditFormatters.js').then(m => {
+        const payload = {
+            agent_execution_results: [
+                { role: 'amount_agent' }
+            ]
+        };
+        const normalized = m.normalizeAgentExecutions(payload);
+        const decisionNull = m.formatApprovalDecision(null);
+        const decisionUnknown = m.formatApprovalDecision('UNKNOWN');
+        console.log(JSON.stringify({
+            agent_status: normalized[0].status,
+            agent_reason: normalized[0].reason,
+            decision_null: decisionNull,
+            decision_unknown: decisionUnknown
+        }));
+    });
+    """
+    res = subprocess.run(["node", "-e", code], capture_output=True, encoding="utf-8", check=True)
+    out = json.loads(res.stdout.strip())
+    assert out["agent_status"] == "UNKNOWN"
+    assert out["agent_reason"] == "未提供执行说明"
+    assert out["decision_null"] == "审批决策待确认"
+    assert out["decision_unknown"] == "审批决策待确认"

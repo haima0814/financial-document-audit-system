@@ -57,7 +57,8 @@ export const approvalDecisionMap = {
   AUTO_APPROVE: '自动免审直通',
   MANUAL_REVIEW: '建议转人工复核',
   NEED_SUPPLEMENT: '要求补证重审',
-  REJECT: '建议直接驳回'
+  REJECT: '建议直接驳回',
+  UNKNOWN: '审批决策待确认'
 }
 
 // 6. 智能体角色中文业务名称映射
@@ -129,8 +130,9 @@ export function formatAuditCompleteness(completeness) {
  * 格式化审批决策建议
  */
 export function formatApprovalDecision(decision) {
-  if (!decision) return '待审批流决断'
+  if (!decision) return '审批决策待确认'
   const key = String(decision).trim().toUpperCase()
+  if (key === 'UNKNOWN') return '审批决策待确认'
   return approvalDecisionMap[key] || `未知 (${decision})`
 }
 
@@ -168,7 +170,8 @@ export function normalizeAgentExecutions(fullReportPayload) {
     for (let i = 0; i < results.length; i++) {
       const item = results[i] || {}
       const rawRole = item.role || item.agent_role || item.name || plannedAgents[i] || `agent_${i}`
-      const status = item.status || 'SUCCESS'
+      // 缺失 status 不得默认 SUCCESS，改为 UNKNOWN
+      const status = item.status || 'UNKNOWN'
       // 缺失 source 绝不默认 DETERMINISTIC_RULE
       const rawSource = item.source != null && item.source !== '' ? item.source : 'UNKNOWN'
       const durationMs = item.duration_ms ?? item.elapsed_ms
@@ -182,7 +185,8 @@ export function normalizeAgentExecutions(fullReportPayload) {
         duration: durationMs != null ? `${durationMs} ms` : '-',
         source: String(rawSource),
         source_cn: formatDecisionSource(rawSource),
-        reason: item.reason || item.detail || '核验通过，未触发阻断性异常',
+        // 缺失 reason 不得默认“核验通过”，改为“未提供执行说明”
+        reason: item.reason || item.detail || '未提供执行说明',
         is_degraded: Boolean(item.is_degraded || status === 'DEGRADED')
       })
     }
@@ -199,7 +203,8 @@ export function normalizeAgentExecutions(fullReportPayload) {
       const k = targetKeys[i]
       const item = results[k] || {}
       const rawRole = item.role || item.name || k
-      const status = item.status || 'SUCCESS'
+      // 缺失 status 不得默认 SUCCESS，改为 UNKNOWN
+      const status = item.status || 'UNKNOWN'
       // 缺失 source 绝不默认 DETERMINISTIC_RULE
       const rawSource = item.source != null && item.source !== '' ? item.source : 'UNKNOWN'
       const durationMs = item.duration_ms ?? item.elapsed_ms
@@ -213,7 +218,8 @@ export function normalizeAgentExecutions(fullReportPayload) {
         duration: durationMs != null ? `${durationMs} ms` : '-',
         source: String(rawSource),
         source_cn: formatDecisionSource(rawSource),
-        reason: item.reason || item.detail || '核验通过，未触发阻断性异常',
+        // 缺失 reason 不得默认“核验通过”，改为“未提供执行说明”
+        reason: item.reason || item.detail || '未提供执行说明',
         is_degraded: Boolean(item.is_degraded || status === 'DEGRADED')
       })
     }
