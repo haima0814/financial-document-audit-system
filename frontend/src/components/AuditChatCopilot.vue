@@ -9,15 +9,30 @@
     </div>
 
     <!-- 消息对话流 -->
-    <div class="chat-messages" ref="msgListRef">
+    <div class="chat-messages" ref="msgListRef" @scroll="handleScroll">
       <div v-for="(msg, idx) in messages" :key="idx" :class="['message-row', msg.role]">
         <div class="avatar-col">
-          <el-avatar :size="32" :icon="msg.role === 'assistant' ? 'Service' : 'User'" :class="msg.role" />
+          <el-avatar :size="32" :icon="msg.role === 'assistant' ? Service : User" :class="msg.role" />
         </div>
         <div class="content-col">
           <div class="bubble">
-            <div class="bubble-text" style="white-space: pre-wrap;">{{ msg.content }}</div>
-            <!-- 引用依据卡片 -->
+            <!-- 正在分析等待首 token 占位 -->
+            <div v-if="!msg.content && msg.isGenerating" class="generating-placeholder">
+              <el-icon class="is-loading"><Loading /></el-icon>
+              <span>正在分析单据事实与制度条款...</span>
+            </div>
+
+            <!-- Markdown 富文本安全渲染 -->
+            <div
+              v-else
+              class="bubble-text markdown-body"
+              v-html="renderMarkdown(msg.content)"
+            ></div>
+
+            <!-- 流式生成光标指示器 -->
+            <span v-if="msg.content && msg.isGenerating" class="typing-cursor"></span>
+
+            <!-- 引用依据卡片 (流结束后稳定展示) -->
             <div v-if="msg.citations && msg.citations.length" class="citations-box">
               <div class="citation-title">📌 关联依据与视觉锚点：</div>
               <div
@@ -25,6 +40,7 @@
                 :key="cIdx"
                 class="citation-pill"
                 @click="emitCitationClick(c)"
+                :title="`点击定位原件 [${c.rule_code}] 视觉区域`"
               >
                 <span>[{{ c.rule_code }}] {{ c.title }}</span>
                 <el-icon><Aim /></el-icon>
@@ -32,18 +48,6 @@
             </div>
           </div>
           <div class="msg-time">{{ msg.time }}</div>
-        </div>
-      </div>
-
-      <div v-if="loading" class="message-row assistant">
-        <div class="avatar-col">
-          <el-avatar :size="32" icon="Service" class="assistant" />
-        </div>
-        <div class="content-col">
-          <div class="bubble loading-bubble">
-            <el-icon class="is-loading"><Loading /></el-icon>
-            <span>正在分析单据事实与制度条款...</span>
-          </div>
         </div>
       </div>
     </div>
@@ -56,6 +60,7 @@
         :key="idx"
         size="small"
         class="prompt-tag"
+        :effect="loading ? 'plain' : 'light'"
         @click="sendQuick(q)"
       >
         {{ q }}
@@ -71,8 +76,8 @@
         :disabled="loading"
       >
         <template #append>
-          <el-button type="primary" @click="handleSend" :loading="loading">
-            发送
+          <el-button type="primary" @click="handleSend" :loading="loading" :disabled="!inputQuery.trim()">
+            {{ loading ? '生成中' : '发送' }}
           </el-button>
         </template>
       </el-input>
@@ -81,9 +86,10 @@
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted } from 'vue'
-import { ChatDotRound, Aim, Loading } from '@element-plus/icons-vue'
-import api from '@/api'
+import { ref, reactive, nextTick, onMounted, watch } from 'vue'
+import { ChatDotRound, Aim, Loading, Service, User } from '@element-plus/icons-vue'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 
 const props = defineProps({
   documentId: [Number, String],
@@ -97,7 +103,8 @@ const messages = ref([
     role: 'assistant',
     content: '您好！我是智能风控审查 Copilot。我已经完成了对该单据的五方金额核对、差旅制度匹配、发票防重及供应商穿透分析。请问有什么我可以帮您解答的？',
     time: new Date().toLocaleTimeString(),
-    citations: []
+    citations: [],
+    isGenerating: false
   }
 ])
 
@@ -105,6 +112,7 @@ const inputQuery = ref('')
 const loading = ref(false)
 const sessionId = ref('')
 const msgListRef = ref(null)
+const userScrolledUp = ref(false)
 
 const quickQuestions = [
   '为什么判定差旅住宿费超标？',
@@ -112,6 +120,31 @@ const quickQuestions = [
   '供应商是否存在高危失信记录？',
   '如何进行合规特批放行？'
 ]
+
+// 安全 Markdown 渲染 (防 XSS)
+const renderMarkdown = (text) => {
+  if (!text) return ''
+  try {
+    const rawHtml = marked.parse(text, { breaks: true, gfm: true })
+    return DOMPurify.sanitize(rawHtml)
+  } catch (err) {
+    console.warn('Markdown 渲染失败:', err)
+    return text
+  }
+}
+
+// 检查用户是否在消息列表底部附近
+const isNearBottom = () => {
+  if (!msgListRef.value) return true
+  const { scrollTop, scrollHeight, clientHeight } = msgListRef.value
+  return scrollHeight - scrollTop - clientHeight <= 70
+}
+
+const handleScroll = () => {
+  if (!msgListRef.value) return
+  // 如果用户主动向上滚动查阅历史，标记 userScrolledUp
+  userScrolledUp.value = !isNearBottom()
+}
 
 const scrollToBottom = () => {
   nextTick(() => {
@@ -122,6 +155,7 @@ const scrollToBottom = () => {
 }
 
 const sendQuick = (q) => {
+  if (loading.value) return
   inputQuery.value = q
   handleSend()
 }
@@ -130,44 +164,137 @@ const handleSend = async () => {
   const query = inputQuery.value.trim()
   if (!query || loading.value) return
 
+  // 1. 立即记录用户消息
   messages.value.push({
     role: 'user',
     content: query,
-    time: new Date().toLocaleTimeString()
+    time: new Date().toLocaleTimeString(),
+    isGenerating: false
   })
   inputQuery.value = ''
   loading.value = true
+  userScrolledUp.value = false
+  scrollToBottom()
+
+  // 2. 立即创建 Assistant 消息占位符 (首 token 前显示“正在分析”)
+  const assistantMsg = reactive({
+    role: 'assistant',
+    content: '',
+    time: new Date().toLocaleTimeString(),
+    citations: [],
+    isGenerating: true
+  })
+  messages.value.push(assistantMsg)
   scrollToBottom()
 
   try {
-    const res = await api.post('/audits/chat', {
-      document_id: Number(props.documentId),
-      message: query,
-      session_id: sessionId.value || null
+    const token = localStorage.getItem('token')
+    const response = await fetch('/api/v1/audits/chat/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      },
+      body: JSON.stringify({
+        document_id: Number(props.documentId),
+        message: query,
+        session_id: sessionId.value || null
+      })
     })
 
-    sessionId.value = res.session_id
-    messages.value.push({
-      role: res.message.role,
-      content: res.message.content,
-      time: new Date().toLocaleTimeString(),
-      citations: res.message.citations || []
-    })
+    if (!response.ok) {
+      const errText = await response.text()
+      assistantMsg.content = `服务响应异常 (${response.status}): ${errText || '无法连接对话服务'}`
+      assistantMsg.isGenerating = false
+      return
+    }
+
+    // 3. 读取 SSE 流式数据
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder('utf-8')
+    let buffer = ''
+    let currentEvent = 'message'
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed) {
+          currentEvent = 'message'
+          continue
+        }
+
+        if (trimmed.startsWith('event:')) {
+          currentEvent = trimmed.slice(6).trim()
+        } else if (trimmed.startsWith('data:')) {
+          const dataStr = trimmed.slice(5).trim()
+          try {
+            const payload = JSON.parse(dataStr)
+
+            if (currentEvent === 'meta') {
+              if (payload.session_id) {
+                sessionId.value = payload.session_id
+              }
+            } else if (currentEvent === 'delta') {
+              if (payload.delta) {
+                assistantMsg.content += payload.delta
+                // 用户在底部附近时才跟随滚动
+                if (!userScrolledUp.value) {
+                  scrollToBottom()
+                }
+              }
+            } else if (currentEvent === 'citations') {
+              if (payload.citations) {
+                assistantMsg.citations = payload.citations
+              }
+            } else if (currentEvent === 'done') {
+              if (payload.session_id) sessionId.value = payload.session_id
+              if (payload.citations && payload.citations.length) {
+                assistantMsg.citations = payload.citations
+              }
+            } else if (currentEvent === 'error') {
+              assistantMsg.content += `\n\n> ⚠️ [AI 对话异常]: ${payload.error || '生成中断'}`
+            }
+          } catch (err) {
+            console.warn('解析 SSE 帧失败:', err, dataStr)
+          }
+        }
+      }
+    }
   } catch (err) {
-    messages.value.push({
-      role: 'assistant',
-      content: '对话服务响应超时，请稍后重试。',
-      time: new Date().toLocaleTimeString()
-    })
+    console.error('流式问答通信异常:', err)
+    if (!assistantMsg.content) {
+      assistantMsg.content = '抱歉，网络连接异常或审查对话服务不可用，请稍后重试。'
+    } else {
+      assistantMsg.content += '\n\n> ⚠️ [网络连接中断]'
+    }
   } finally {
+    assistantMsg.isGenerating = false
     loading.value = false
-    scrollToBottom()
+    if (!userScrolledUp.value) {
+      scrollToBottom()
+    }
   }
 }
 
 const emitCitationClick = (citation) => {
   emit('selectCitation', citation)
 }
+
+watch(
+  () => props.initialQuestion,
+  (newQ) => {
+    if (newQ) {
+      sendQuick(newQ)
+    }
+  }
+)
 
 onMounted(() => {
   if (props.initialQuestion) {
@@ -181,6 +308,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-width: 0;
   background: #ffffff;
   border-radius: 8px;
   border: 1px solid #e2e8f0;
@@ -191,42 +319,51 @@ onMounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
+  padding: 10px 14px;
   background: #f8fafc;
   border-bottom: 1px solid #e2e8f0;
+  flex-shrink: 0;
 }
 
 .header-left {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .ai-icon {
   font-size: 18px;
   color: #3b82f6;
+  flex-shrink: 0;
 }
 
 .header-title {
   font-weight: 600;
   color: #0f172a;
-  font-size: 14px;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-messages {
   flex: 1;
-  padding: 16px;
+  padding: 14px;
   overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   background: #fafafa;
+  min-width: 0;
 }
 
 .message-row {
   display: flex;
-  gap: 12px;
-  max-width: 88%;
+  gap: 10px;
+  max-width: 92%;
+  min-width: 0;
 }
 
 .message-row.user {
@@ -236,6 +373,10 @@ onMounted(() => {
 
 .message-row.assistant {
   align-self: flex-start;
+}
+
+.avatar-col {
+  flex-shrink: 0;
 }
 
 .avatar-col .assistant {
@@ -249,6 +390,8 @@ onMounted(() => {
 .content-col {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  flex: 1;
 }
 
 .bubble {
@@ -257,6 +400,10 @@ onMounted(() => {
   font-size: 13px;
   line-height: 1.6;
   box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  min-width: 0;
 }
 
 .message-row.user .bubble {
@@ -272,11 +419,75 @@ onMounted(() => {
   border-bottom-left-radius: 2px;
 }
 
-.loading-bubble {
+.generating-placeholder {
   display: flex;
   align-items: center;
   gap: 8px;
   color: #64748b;
+  font-size: 12px;
+}
+
+/* Markdown 富文本样式 */
+.markdown-body {
+  font-size: 13px;
+  line-height: 1.65;
+  color: #1e293b;
+}
+
+.markdown-body :deep(p) {
+  margin: 0 0 8px 0;
+}
+
+.markdown-body :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.markdown-body :deep(ul),
+.markdown-body :deep(ol) {
+  margin: 4px 0 8px 18px;
+  padding: 0;
+}
+
+.markdown-body :deep(li) {
+  margin-bottom: 4px;
+}
+
+.markdown-body :deep(strong) {
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.markdown-body :deep(code) {
+  background: #f1f5f9;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.markdown-body :deep(blockquote) {
+  margin: 6px 0;
+  padding: 4px 10px;
+  border-left: 3px solid #3b82f6;
+  background: #f8fafc;
+  color: #475569;
+  border-radius: 0 4px 4px 0;
+}
+
+/* 打字机闪烁光标 */
+.typing-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 13px;
+  background: #3b82f6;
+  margin-left: 4px;
+  vertical-align: middle;
+  animation: blink 0.9s infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
 
 .citations-box {
@@ -305,10 +516,12 @@ onMounted(() => {
   margin-right: 6px;
   margin-bottom: 4px;
   transition: all 0.2s;
+  word-break: break-all;
 }
 
 .citation-pill:hover {
   background: #dbeafe;
+  border-color: #93c5fd;
 }
 
 .msg-time {
@@ -325,25 +538,29 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 16px;
+  padding: 8px 14px;
   background: #f1f5f9;
   overflow-x: auto;
+  flex-shrink: 0;
 }
 
 .prompt-label {
   font-size: 11px;
   color: #64748b;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .prompt-tag {
   cursor: pointer;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .chat-input-area {
-  padding: 12px 16px;
+  padding: 10px 14px;
   background: #ffffff;
   border-top: 1px solid #e2e8f0;
+  flex-shrink: 0;
 }
 </style>

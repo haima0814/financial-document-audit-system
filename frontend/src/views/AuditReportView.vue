@@ -30,23 +30,25 @@
             <div class="score-meta">
               <div class="score-title">智能风控综合体检评分</div>
               <div class="tag-group">
-                <el-tag :type="getRiskTagType(report.overall_risk_level)" size="small" effect="dark">
-                  {{ (report.overall_risk_level || 'LOW').toUpperCase() }} 风险等级
+                <el-tag :type="getRiskLevelTagType(report.overall_risk_level)" size="small" effect="dark">
+                  {{ formatRiskLevel(report.overall_risk_level) }}
                 </el-tag>
                 <!-- 审核完整度 AuditCompleteness -->
-                <el-tag :type="completenessTagType" size="small" effect="dark">
-                  {{ completenessText }}
+                <el-tag :type="getCompletenessTagType(auditCompleteness)" size="small" effect="dark">
+                  {{ formatAuditCompleteness(auditCompleteness) }}
                 </el-tag>
                 <!-- 审批决策 ApprovalDecision -->
-                <el-tag :type="decisionTagType" size="small" effect="dark">
-                  {{ decisionText }}
+                <el-tag :type="getDecisionTagType(decisionAction)" size="small" effect="dark">
+                  {{ formatApprovalDecision(decisionAction) }}
                 </el-tag>
               </div>
             </div>
           </div>
 
           <div class="summary-card">
-            <div class="summary-text">{{ report.summary || '经多智能体联合核查，各项数据核验完毕。' }}</div>
+            <div class="summary-text" :title="report.summary || '经多智能体联合核查，各项数据核验完毕。'">
+              {{ report.summary || '经多智能体联合核查，各项数据核验完毕。' }}
+            </div>
             <div class="risk-counters">
               <span class="counter-item text-danger">高危红线: <strong>{{ report.high_risks_count || 0 }}</strong> 项</span>
               <span class="counter-item text-warning">中危合规: <strong>{{ report.medium_risks_count || 0 }}</strong> 项</span>
@@ -111,6 +113,14 @@
             :title="`⛔ 状态机一票否决 (REJECT)：${decisionReason || '检出不可覆盖高危违规项，系统直接终审驳回并终止审批。'}`"
           />
         </div>
+        <div v-if="decisionAction === 'NEED_SUPPLEMENT'" class="banner-alert">
+          <el-alert
+            type="warning"
+            show-icon
+            :closable="false"
+            :title="`⚠️ 要求补正材料 (NEED_SUPPLEMENT)：${decisionReason || '单据凭据或关联材料不全，需由经办人补充后再行复核。'}`"
+          />
+        </div>
 
         <!-- 第二行：检出违规命中原因直观清单 -->
         <div class="hit-reasons-bar">
@@ -123,7 +133,7 @@
               placement="bottom"
             >
               <el-tag
-                :type="getRiskTagType(finding.risk_level)"
+                :type="getRiskLevelTagType(finding.risk_level)"
                 effect="light"
                 class="hit-reason-tag"
                 :class="{ 'is-active-tag': selectedFinding?.id === finding.id }"
@@ -147,7 +157,7 @@
       </div>
 
       <!-- 三栏核心诊断视窗：左票据原件锚点 + 中风控证据详情 + 右智能问答 Copilot -->
-      <div class="report-workbench-layout">
+      <div class="report-workbench-layout" :class="{ 'is-chat-collapsed': isChatCollapsed }">
         <!-- 左栏：票据与 BBox 视觉锚点 -->
         <div class="workbench-col canvas-col">
           <InvoiceCanvasViewer
@@ -184,8 +194,8 @@
             >
               <div class="finding-card-header">
                 <div class="finding-title-group">
-                  <el-tag size="small" :type="getRiskTagType(finding.risk_level)">
-                    {{ finding.risk_level.toUpperCase() }}
+                  <el-tag size="small" :type="getRiskLevelTagType(finding.risk_level)">
+                    {{ formatRiskLevel(finding.risk_level) }}
                   </el-tag>
                   <span class="rule-code-badge">{{ finding.rule_code }}</span>
                   <span class="finding-title">{{ finding.title }}</span>
@@ -197,7 +207,7 @@
                   <el-tag v-else size="small" type="info" effect="plain">
                     可人工审批覆盖
                   </el-tag>
-                  <el-tag size="small" type="info" effect="plain">{{ finding.agent_role }}</el-tag>
+                  <el-tag size="small" type="info" effect="plain">{{ formatAgentRole(finding.agent_role) }}</el-tag>
                 </div>
               </div>
 
@@ -271,7 +281,7 @@
         </div>
       </div>
 
-      <!-- 多智能体协同执行明细简单表格 (Agent Execution Plan) -->
+      <!-- 多智能体协同执行明细表格 (Agent Execution Plan) -->
       <div class="agent-executions-section">
         <div class="section-card">
           <div class="section-header">
@@ -279,29 +289,46 @@
               <el-icon><Cpu /></el-icon>
               <span>多智能体协同执行明细 (Agent Execution Plan)</span>
             </div>
-            <el-tag size="small" type="info">{{ agentExecutions.length }} 个核验节点</el-tag>
+            <el-tag size="small" type="info">{{ normalizedAgentExecutions.length }} 个核验节点</el-tag>
           </div>
-          <el-table :data="agentExecutions" size="small" border stripe style="width: 100%">
-            <el-table-column prop="role" label="智能体角色" width="180">
+          <el-table :data="normalizedAgentExecutions" size="small" border stripe style="width: 100%">
+            <el-table-column prop="role_cn" label="智能体角色" min-width="220">
               <template #default="{ row }">
-                <strong>{{ row.role }}</strong>
-                <span class="text-muted" style="margin-left: 4px; font-size: 11px;">({{ row.name }})</span>
+                <div class="agent-role-cell">
+                  <strong class="role-cn-text">{{ row.role_cn }}</strong>
+                  <el-tooltip :content="`底层标识: ${row.raw_role}`" placement="top">
+                    <span class="raw-role-hint">({{ row.raw_role }})</span>
+                  </el-tooltip>
+                </div>
               </template>
             </el-table-column>
-            <el-table-column prop="status" label="执行状态" width="120">
+            <el-table-column prop="status" label="执行状态" width="130">
               <template #default="{ row }">
-                <el-tag :type="getAgentStatusType(row.status)" size="small">
-                  {{ row.status }}
+                <el-tag :type="getAgentStatusTagType(row.status)" size="small">
+                  {{ row.status_cn }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="duration" label="耗时" width="100" />
+            <el-table-column prop="duration" label="耗时" width="110" />
             <el-table-column prop="source" label="决策来源" width="160">
               <template #default="{ row }">
-                <el-tag size="small" effect="plain" type="info">{{ row.source }}</el-tag>
+                <el-tag size="small" effect="plain" type="info">{{ row.source_cn }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="reason" label="判定依据 / 降级说明" min-width="240" />
+            <el-table-column prop="reason" label="判定依据 / 降级说明" min-width="280">
+              <template #default="{ row }">
+                <div class="reason-cell">
+                  <span v-if="!expandedRows.has(row.id) && (row.reason && row.reason.length > 60)">
+                    {{ row.reason.slice(0, 60) }}...
+                    <el-button type="primary" link size="small" @click="toggleRowExpand(row.id)">展开</el-button>
+                  </span>
+                  <span v-else>
+                    {{ row.reason }}
+                    <el-button v-if="row.reason && row.reason.length > 60" type="primary" link size="small" @click="toggleRowExpand(row.id)">收起</el-button>
+                  </span>
+                </div>
+              </template>
+            </el-table-column>
           </el-table>
         </div>
       </div>
@@ -316,6 +343,19 @@ import { Aim, ChatLineRound, DArrowRight, Cpu, Check, Refresh, Back } from '@ele
 import api from '@/api'
 import InvoiceCanvasViewer from '@/components/InvoiceCanvasViewer.vue'
 import AuditChatCopilot from '@/components/AuditChatCopilot.vue'
+import {
+  formatDecisionSource,
+  formatExecutionStatus,
+  formatRiskLevel,
+  formatAuditCompleteness,
+  formatApprovalDecision,
+  formatAgentRole,
+  normalizeAgentExecutions,
+  getRiskLevelTagType,
+  getCompletenessTagType,
+  getDecisionTagType,
+  getAgentStatusTagType
+} from '@/utils/auditFormatters'
 
 const route = useRoute()
 const router = useRouter()
@@ -333,29 +373,21 @@ const currentSelectedDocId = ref('')
 
 const invoiceData = ref({})
 
+// 表格展开行集合
+const expandedRows = ref(new Set())
+const toggleRowExpand = (id) => {
+  if (expandedRows.value.has(id)) {
+    expandedRows.value.delete(id)
+  } else {
+    expandedRows.value.add(id)
+  }
+}
+
 // 审核完整度
 const auditCompleteness = computed(() => {
   if (!report.value) return 'COMPLETE'
   const payload = report.value.full_report_payload || {}
   return payload.audit_completeness || 'COMPLETE'
-})
-
-const completenessText = computed(() => {
-  const map = {
-    COMPLETE: 'COMPLETE 审核完备',
-    DEGRADED: 'DEGRADED 降级运行',
-    INCOMPLETE: 'INCOMPLETE 审核未完备'
-  }
-  return map[auditCompleteness.value] || auditCompleteness.value
-})
-
-const completenessTagType = computed(() => {
-  const map = {
-    COMPLETE: 'success',
-    DEGRADED: 'warning',
-    INCOMPLETE: 'danger'
-  }
-  return map[auditCompleteness.value] || 'info'
 })
 
 // 审批决策
@@ -384,72 +416,10 @@ const decisionReason = computed(() => {
   return payload.approval_decision?.reason || ''
 })
 
-const decisionText = computed(() => {
-  const map = {
-    AUTO_APPROVE: '自动放行 (AUTO_APPROVE)',
-    MANUAL_REVIEW: '人工初复审 (MANUAL_REVIEW)',
-    NEED_SUPPLEMENT: '要求补证 (NEED_SUPPLEMENT)',
-    REJECT: '一票否决 (REJECT)'
-  }
-  return map[decisionAction.value] || decisionAction.value
+// 多智能体协同明细归一化
+const normalizedAgentExecutions = computed(() => {
+  return normalizeAgentExecutions(report.value?.full_report_payload)
 })
-
-const decisionTagType = computed(() => {
-  const map = {
-    AUTO_APPROVE: 'success',
-    MANUAL_REVIEW: 'warning',
-    NEED_SUPPLEMENT: 'warning',
-    REJECT: 'danger'
-  }
-  return map[decisionAction.value] || 'info'
-})
-
-// 多智能体协同明细
-const agentExecutions = computed(() => {
-  const payload = report.value?.full_report_payload
-  if (!payload) return []
-  const results = payload.agent_execution_results || {}
-  const plan = payload.execution_plan || {}
-  const plannedAgents = plan.planned_agents || Object.keys(results)
-
-  const list = []
-  for (const agentName of plannedAgents) {
-    const exec = results[agentName] || {}
-    list.push({
-      name: agentName,
-      role: getAgentRoleName(agentName),
-      status: exec.status || 'PLANNED',
-      duration: exec.elapsed_ms != null ? `${exec.elapsed_ms} ms` : (exec.duration_ms != null ? `${exec.duration_ms} ms` : '-'),
-      source: exec.source || 'UNKNOWN',
-      reason: exec.reason || exec.detail || '按既定能力集核验通过'
-    })
-  }
-  return list
-})
-
-const getAgentRoleName = (name) => {
-  const map = {
-    InvoiceOcrAgent: '票据OCR解析专家',
-    AmountAgent: '金额平衡与纳税校验专家',
-    ComplianceAgent: '内控制度与合规校验专家',
-    SupplierAgent: '供应商资质与画像风控专家',
-    BehaviorAgent: '员工历史报销行为画像专家',
-    ReviewerReflector: '终审门禁反思专家',
-    ReportAgent: '综合报告生成专家'
-  }
-  return map[name] || name
-}
-
-const getAgentStatusType = (status) => {
-  const map = {
-    SUCCESS: 'success',
-    DEGRADED: 'warning',
-    FAILED: 'danger',
-    SKIPPED: 'info',
-    PLANNED: 'info'
-  }
-  return map[status] || 'info'
-}
 
 // 终审反思消歧日志
 const disambiguationLogs = computed(() => {
@@ -517,7 +487,7 @@ const fetchReport = async () => {
     loading.value = false
   }
 
-  // 同步获取单据关联发票原件与 OCR 视觉坐标 (不硬编码虚假发票)
+  // 同步获取单据关联发票原件与 OCR 视觉坐标
   try {
     const docRes = await api.get(`/documents/${documentId.value}`)
     if (docRes && docRes.invoices && docRes.invoices.length > 0) {
@@ -574,12 +544,6 @@ const getScoreClass = (score) => {
   return 'score-red'
 }
 
-const getRiskTagType = (lvl) => {
-  if (lvl === 'high') return 'danger'
-  if (lvl === 'medium') return 'warning'
-  return 'success'
-}
-
 const getStatusType = (status) => {
   const map = {
     DRAFT: 'info',
@@ -627,7 +591,9 @@ onMounted(() => {
   flex-direction: column;
   gap: 16px;
   min-height: calc(100vh - 100px);
-  min-width: 1120px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   padding-bottom: 24px;
 }
 
@@ -653,13 +619,15 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  box-sizing: border-box;
+  width: 100%;
 }
 
 .banner-top-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
+  gap: 16px;
   flex-wrap: wrap;
 }
 
@@ -669,7 +637,7 @@ onMounted(() => {
   gap: 14px;
   border-right: 1px solid #e2e8f0;
   padding-right: 20px;
-  min-width: 320px;
+  flex-shrink: 0;
 }
 
 .score-number {
@@ -701,14 +669,21 @@ onMounted(() => {
 
 .summary-card {
   flex: 1;
-  min-width: 320px;
+  min-width: 260px;
 }
 
 .summary-text {
   font-size: 13px;
-  color: #1e293b;
+  color: #334155;
   line-height: 1.5;
   margin-bottom: 6px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-word;
 }
 
 .risk-counters {
@@ -727,6 +702,7 @@ onMounted(() => {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
 .doc-option-item {
@@ -795,47 +771,127 @@ onMounted(() => {
 .tag-amount { font-weight: 700; color: #b91c1c; }
 .tag-aim-icon { font-size: 12px; color: #3b82f6; margin-left: 2px; }
 
+/* 响应式工作台网格布局 */
 .report-workbench-layout {
-  display: flex;
+  display: grid;
   gap: 16px;
-  height: 580px;
-  overflow: hidden;
+  width: 100%;
 }
 
 .workbench-col {
-  height: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
 }
 
 .canvas-col {
-  flex: 1.2;
-  min-width: 380px;
+  min-width: 0;
 }
 
 .findings-col {
-  flex: 1.2;
-  min-width: 380px;
+  min-width: 0;
   background: #ffffff;
   border-radius: 8px;
   border: 1px solid #e2e8f0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .chat-col {
-  flex: 1;
-  min-width: 300px;
+  min-width: 0;
   transition: all 0.25s ease;
 }
 
-.chat-col.collapsed {
-  flex: 0 0 42px;
-  min-width: 42px;
-  width: 42px;
-  overflow: hidden;
-  background: #ffffff;
-  border-radius: 8px;
-  border: 1px solid #e2e8f0;
+/* >= 1440px: 标准三栏并列 (票据 34% | 风险项 38% | AI 28%) */
+@media (min-width: 1440px) {
+  .report-workbench-layout {
+    grid-template-columns: 34fr 38fr 28fr;
+    height: 640px;
+  }
+  .report-workbench-layout.is-chat-collapsed {
+    grid-template-columns: 1fr 1fr 42px;
+  }
+  .canvas-col,
+  .findings-col,
+  .chat-col {
+    height: 100%;
+  }
+  .chat-col.collapsed {
+    width: 42px;
+    min-width: 42px;
+    overflow: hidden;
+    background: #ffffff;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+  }
+}
+
+/* 1024px ~ 1439px: 原件 48% + 风险项 52% 并列，AI Copilot 横跨第二行 */
+@media (min-width: 1024px) and (max-width: 1439px) {
+  .report-workbench-layout {
+    grid-template-columns: 48fr 52fr;
+  }
+  .canvas-col {
+    height: 560px;
+  }
+  .findings-col {
+    height: 560px;
+  }
+  .chat-col {
+    grid-column: 1 / -1;
+    height: 500px;
+  }
+  .chat-col.collapsed {
+    height: 44px;
+    overflow: hidden;
+    background: #ffffff;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+  }
+  .chat-col.collapsed .collapsed-chat-bar {
+    flex-direction: row;
+    height: 44px;
+    padding: 0 16px;
+    gap: 8px;
+  }
+  .chat-col.collapsed .vertical-text {
+    writing-mode: horizontal-tb;
+    letter-spacing: 1px;
+  }
+}
+
+/* < 1024px: 单列垂直流排版 */
+@media (max-width: 1023px) {
+  .report-workbench-layout {
+    grid-template-columns: 1fr;
+  }
+  .canvas-col {
+    height: 500px;
+  }
+  .findings-col {
+    height: 500px;
+  }
+  .chat-col {
+    height: 480px;
+  }
+  .chat-col.collapsed {
+    height: 44px;
+    overflow: hidden;
+    background: #ffffff;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+  }
+  .chat-col.collapsed .collapsed-chat-bar {
+    flex-direction: row;
+    height: 44px;
+    padding: 0 16px;
+    gap: 8px;
+  }
+  .chat-col.collapsed .vertical-text {
+    writing-mode: horizontal-tb;
+    letter-spacing: 1px;
+  }
 }
 
 .collapsed-chat-bar {
@@ -901,20 +957,52 @@ onMounted(() => {
 .finding-card-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   margin-bottom: 8px;
+  gap: 8px;
+  flex-wrap: wrap;
 }
-.finding-title-group { display: flex; align-items: center; gap: 8px; }
-.finding-tags-right { display: flex; align-items: center; gap: 6px; }
+.finding-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.finding-tags-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
 .rule-code-badge {
   font-family: monospace;
   font-size: 11px;
   background: #f1f5f9;
   padding: 2px 6px;
   border-radius: 4px;
+  flex-shrink: 0;
 }
-.finding-title { font-weight: 600; color: #1e293b; font-size: 13px; }
-.finding-desc { font-size: 12px; color: #475569; line-height: 1.5; margin-bottom: 8px; }
+.finding-title {
+  font-weight: 600;
+  color: #1e293b;
+  font-size: 13px;
+  min-width: 0;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.finding-desc {
+  font-size: 12px;
+  color: #475569;
+  line-height: 1.5;
+  margin-bottom: 8px;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
 .discrepancy-row { font-size: 12px; margin-bottom: 6px; }
 .suggestion-row {
   font-size: 12px;
@@ -922,6 +1010,9 @@ onMounted(() => {
   padding: 6px 10px;
   border-radius: 4px;
   margin-bottom: 8px;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .sugg-label { font-weight: 600; color: #334155; }
 .card-footer-actions { display: flex; justify-content: flex-end; gap: 12px; }
@@ -971,5 +1062,39 @@ onMounted(() => {
 .log-desc {
   color: #166534;
   line-height: 1.4;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* 智能体执行明细单元格 */
+.agent-role-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.role-cn-text {
+  font-size: 13px;
+  color: #1e293b;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.raw-role-hint {
+  font-size: 11px;
+  color: #94a3b8;
+  font-family: monospace;
+  cursor: help;
+}
+
+.reason-cell {
+  font-size: 12px;
+  color: #334155;
+  line-height: 1.5;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 </style>

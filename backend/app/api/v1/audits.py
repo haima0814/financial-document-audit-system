@@ -4,6 +4,7 @@ backend/app/api/v1/audits.py
 """
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -71,3 +72,15 @@ async def chat_with_audit(
     service = AuditService(db)
     res = await service.chat_with_audit_context(user_id=current_user.user_id, req=req)
     return res
+
+@router.post("/chat/stream", summary="基于审查报告与证据链进行流式智能问答 (SSE)")
+async def chat_with_audit_stream(
+    req: AuditChatReq,
+    current_user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    service = AuditService(db)
+    return StreamingResponse(
+        service.chat_with_audit_context_stream(user_id=current_user.user_id, req=req),
+        media_type="text/event-stream"
+    )

@@ -265,6 +265,115 @@ class LLMClient:
         return await cls.chat_completion(messages=messages, temperature=0.3)
 
     @classmethod
+    async def stream_chat_completion(
+        cls,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.3,
+        max_tokens: int = 1500,
+        timeout: float = 30.0
+    ):
+        """
+        向 OpenAI 兼容接口发送流式补全请求 (SSE generator)
+        直接实时产出 delta 字符串
+        """
+        if not cls.is_configured():
+            return
+
+        url = f"{settings.OPENAI_BASE_URL.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": settings.DEFAULT_LLM_MODEL,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("POST", url, json=payload, headers=headers) as response:
+                    if response.status_code != 200:
+                        logger.warning(f"大模型流式响应非200状态码: {response.status_code}")
+                        return
+
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line.startswith("data:"):
+                            data_str = line[5:].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                chunk_json = json.loads(data_str)
+                                choices = chunk_json.get("choices", [])
+                                if choices:
+                                    delta = choices[0].get("delta", {})
+                                    content = delta.get("content")
+                                    if content:
+                                        yield content
+                            except Exception:
+                                continue
+        except Exception as e:
+            logger.warning(f"大模型流式调用异常: {e}")
+            return
+
+    @classmethod
+    async def stream_audit_copilot(
+        cls,
+        document_title: str,
+        document_type: str,
+        total_amount: str,
+        findings_summary: List[Dict[str, Any]],
+        user_query: str
+    ):
+        """
+        基于 RAG 单据事实上下文与检出风险项向大模型流式提问
+        """
+        system_prompt = (
+            "你是一名资深的智能财务风控审计专家，负责协助经办人、财务复核员和 CFO 解答单据风控体检报告中的疑问。\n"
+            "要求：\n"
+            "1. 语气严谨、专业、客观，对财务合规与内控条款条理清晰；\n"
+            "2. 紧扣提供的单据事实与检出的风险发现项；\n"
+            "3. 如有风险违规，请明确指出违规条款、风险等级、关联发票或明细事实，并给出具体合规处置建议（如补齐说明、特批放行条件、退单重报）。\n"
+            "4. 回答格式清晰，善用 Markdown 列表与重点加粗。"
+        )
+
+        context_lines = [
+            f"【单据上下文】",
+            f"- 单据事由/标题: {document_title}",
+            f"- 单据类型: {document_type}",
+            f"- 申报总金额: ¥{total_amount} 元",
+            f"\n【系统检出的风控发现项 (Findings)】:"
+        ]
+        if findings_summary:
+            for idx, f in enumerate(findings_summary, 1):
+                context_lines.append(
+                    f"{idx}. [{f.get('rule_code')}] {f.get('rule_name')} (风险等级: {f.get('risk_level')})\n"
+                    f"   事实描述: {f.get('description')}\n"
+                    f"   处置建议: {f.get('suggestion')}"
+                )
+        else:
+            context_lines.append("未检出任何高危或合规违规风险，各指标均在合理容差与标准内。")
+
+        user_content = (
+            f"{chr(10).join(context_lines)}\n\n"
+            f"【提问人疑问】: {user_query}\n\n"
+            "请基于以上客观事实与审计发现进行针对性专业解答："
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ]
+
+        async for token in cls.stream_chat_completion(messages=messages, temperature=0.3):
+            yield token
+
+    @classmethod
     async def audit_policy_rationality(
         cls,
         title: str,

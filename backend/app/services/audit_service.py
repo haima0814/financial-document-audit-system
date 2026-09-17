@@ -472,3 +472,158 @@ class AuditService:
                 created_at=ai_msg.created_at
             )
         )
+
+    async def chat_with_audit_context_stream(
+        self,
+        user_id: int,
+        req: AuditChatReq
+    ):
+        """
+        流式 AI 审查问答生成器 (SSE 协议规范)
+        支持真实大模型流式输出与离线高质量知识模板增量平滑推送
+        事件协议：
+        1. event: meta (携带 session_id)
+        2. event: delta (增量返回 token/chunk: {"delta": "..."})
+        3. event: citations (携带关联风险发现项与视觉锚点)
+        4. event: done (完成通知，并在后台一次性落库完整回答)
+        """
+        import asyncio
+        import json
+        import uuid
+        from app.models.audit import AuditChatSession, AuditChatMessage
+        from app.models.document import FinancialDocument
+        from app.core.llm_client import LLMClient
+
+        session_id = req.session_id
+        try:
+            # 1. 查找或创建 Session
+            if not session_id:
+                session_id = f"sess_{uuid.uuid4().hex[:12]}"
+                chat_session = AuditChatSession(
+                    session_id=session_id,
+                    document_id=req.document_id,
+                    user_id=user_id
+                )
+                self.db.add(chat_session)
+                await self.db.flush()
+
+            # 发送 meta 事件
+            yield f"event: meta\ndata: {json.dumps({'session_id': session_id}, ensure_ascii=False)}\n\n"
+
+            # 2. 记录用户提问
+            user_msg = AuditChatMessage(
+                session_id=session_id,
+                role="user",
+                content=req.message,
+                citations=[]
+            )
+            self.db.add(user_msg)
+            await self.db.flush()
+
+            # 3. 加载单据与风控报告上下文
+            doc = await self.db.get(FinancialDocument, req.document_id)
+            report = await self.get_report_by_document(req.document_id)
+
+            citations = []
+            full_content_parts = []
+
+            if not report:
+                not_ready = "当前单据尚未完成 AI 审查流水线，暂未出具风险体检报告。请稍候提交审核或等待分析完成。"
+                full_content_parts.append(not_ready)
+                yield f"event: delta\ndata: {json.dumps({'delta': not_ready}, ensure_ascii=False)}\n\n"
+            else:
+                findings = report.findings or []
+                matched_findings = []
+                q_lower = req.message.lower()
+                for f in findings:
+                    if any(kw in q_lower for kw in [f.rule_name.lower(), f.title.lower(), "超标", "发票", "金额", "公司", "连号", "行程"]):
+                        matched_findings.append(f)
+
+                if not matched_findings and findings:
+                    matched_findings = findings[:2]
+
+                for mf in matched_findings:
+                    citations.append({
+                        "finding_id": mf.finding_id,
+                        "rule_code": mf.rule_code,
+                        "title": mf.title,
+                        "primary_visual_anchor": mf.primary_visual_anchor
+                    })
+
+                findings_summary = [
+                    {
+                        "rule_code": f.rule_code,
+                        "rule_name": f.rule_name,
+                        "risk_level": f.risk_level,
+                        "description": f.description,
+                        "suggestion": f.suggestion
+                    }
+                    for f in findings
+                ]
+
+                streamed_any = False
+                if LLMClient.is_configured():
+                    try:
+                        async for chunk in LLMClient.stream_audit_copilot(
+                            document_title=doc.title if doc else "未知单据",
+                            document_type=doc.document_type if doc else "未知类型",
+                            total_amount=str(doc.total_amount if doc else "0.00"),
+                            findings_summary=findings_summary,
+                            user_query=req.message
+                        ):
+                            streamed_any = True
+                            full_content_parts.append(chunk)
+                            yield f"event: delta\ndata: {json.dumps({'delta': chunk}, ensure_ascii=False)}\n\n"
+                    except Exception as e:
+                        logger.warning(f"大模型流式调用异常: {e}")
+
+                if not streamed_any:
+                    # 规则引擎模板流式输出 (支持离线与本地演示真实增量输出)
+                    if matched_findings:
+                        points = []
+                        for idx, mf in enumerate(matched_findings, 1):
+                            points.append(
+                                f"{idx}. **[{mf.rule_name}]** ({mf.risk_level.upper()}级风险)：{mf.description}。\n   - 建议处理：{mf.suggestion}"
+                            )
+                        fallback_text = (
+                            f"针对单据【{doc.title if doc else ''}】，系统检出的相关风险发现如下：\n\n"
+                            + "\n\n".join(points)
+                            + "\n\n如需特批放行，请审批人在审批意见中注明合规依据或经办说明。"
+                        )
+                    else:
+                        fallback_text = (
+                            f"经多智能体联合核查，单据【{doc.title if doc else ''}】各项指标合规，未发现明显异常或违规风险。"
+                            f"综合评分为 {report.final_score} 分（{report.overall_risk_level.upper()}风险等级）。"
+                        )
+
+                    import re
+                    # 依据词句片段平滑增量推送
+                    tokens = re.findall(r"\S+|\n+", fallback_text)
+                    for idx, t in enumerate(tokens):
+                        suffix = " " if not t.endswith("\n") else ""
+                        chunk = t + suffix
+                        full_content_parts.append(chunk)
+                        yield f"event: delta\ndata: {json.dumps({'delta': chunk}, ensure_ascii=False)}\n\n"
+                        await asyncio.sleep(0.015)
+
+            # 4. 发送 citations 事件
+            if citations:
+                yield f"event: citations\ndata: {json.dumps({'citations': citations}, ensure_ascii=False)}\n\n"
+
+            # 5. 落库持久化完整回复消息 (仅在流完成后一次性提交，禁止每 token 写入)
+            final_reply = "".join(full_content_parts)
+            ai_msg = AuditChatMessage(
+                session_id=session_id,
+                role="assistant",
+                content=final_reply,
+                citations=citations
+            )
+            self.db.add(ai_msg)
+            await self.db.commit()
+
+            # 6. 发送 done 结束事件
+            yield f"event: done\ndata: {json.dumps({'session_id': session_id, 'citations': citations}, ensure_ascii=False)}\n\n"
+
+        except Exception as exc:
+            logger.exception(f"流式问答异常: {exc}")
+            yield f"event: error\ndata: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n"
