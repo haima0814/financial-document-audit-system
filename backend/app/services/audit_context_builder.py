@@ -99,20 +99,25 @@ class AuditContextBuilder:
             for inv in invoices_orm
         ]
 
-        # 5. 构建差旅时空轨迹点 (若为差旅单据)
+        # 5. 构建差旅时空轨迹点 (若为差旅单据，严禁非北京默认全成上海)
+        from engines.policy_agent.city_geo import get_city_geo
         spatio_points: List[Dict[str, Any]] = []
         if doc.document_type == "TRAVEL_REIMBURSEMENT":
             for item in line_items_data:
-                if item.get("city_name") and item.get("start_date"):
-                    city = item["city_name"]
-                    lat, lng = (39.9042, 116.4074) if "北京" in city else (31.2304, 121.4737)
-                    spatio_points.append({
-                        "event_time": item["start_date"],
-                        "city_name": city,
-                        "latitude": lat,
-                        "longitude": lng,
-                        "source_desc": item.get("item_desc", "")
-                    })
+                city = item.get("city_name")
+                s_date = item.get("start_date")
+                if city and s_date:
+                    geo = get_city_geo(city)
+                    if geo:
+                        spatio_points.append({
+                            "event_time": s_date,
+                            "city_name": geo.name,
+                            "latitude": geo.latitude,
+                            "longitude": geo.longitude,
+                            "source_desc": item.get("item_desc", "")
+                        })
+                    else:
+                        logger.warning(f"[AuditContextBuilder] 无法识别城市[{city}]地理坐标，跳过生成该时空点 (DATA_MISSING)")
 
         # 5.5 构建交通票据行程段 (行程路线事实)
         from engines.orchestrator.master_graph import MasterOrchestrator

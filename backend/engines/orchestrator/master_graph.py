@@ -48,23 +48,37 @@ class MasterOrchestrator:
             return None
 
     @classmethod
+    def _resolve_station_city(cls, raw_input: Optional[str]) -> Optional[str]:
+        """优先利用现有城市库的包含匹配解析标准城市，解析失败保留原始文本，禁止暴力裁剪字符"""
+        if not raw_input:
+            return None
+        cleaned = raw_input.strip()
+        geo = get_city_geo(cleaned)
+        if geo:
+            return geo.short_name
+        return cleaned
+
+    @classmethod
     def _extract_travel_segments(
         cls,
         invoices: List[Dict[str, Any]],
         line_items: List[Dict[str, Any]],
         context_segments: Optional[List[Dict[str, Any]]] = None
     ) -> List[Dict[str, Any]]:
-        """从票据事实与明细中提取标准化合法行程段 (严禁伪造发到时刻)"""
+        """从票据事实与明细中提取标准化合法行程段 (严禁伪造发到时刻与乘车日期)"""
         segments: List[Dict[str, Any]] = []
         if context_segments:
             for s in context_segments:
-                segments.append(dict(s))
+                seg_dict = dict(s)
+                seg_dict["departure_city"] = cls._resolve_station_city(seg_dict.get("departure_city"))
+                seg_dict["arrival_city"] = cls._resolve_station_city(seg_dict.get("arrival_city"))
+                segments.append(seg_dict)
             return segments
 
         for inv in invoices:
             raw_p = inv.get("raw_payload") or inv.get("raw_ocr_data") or {}
-            dep_city = inv.get("departure_city") or raw_p.get("departure_city")
-            arr_city = inv.get("arrival_city") or raw_p.get("arrival_city")
+            dep_city = cls._resolve_station_city(inv.get("departure_city") or raw_p.get("departure_city"))
+            arr_city = cls._resolve_station_city(inv.get("arrival_city") or raw_p.get("arrival_city"))
             dep_time = inv.get("departure_time") or raw_p.get("departure_time")
             arr_time = inv.get("arrival_time") or raw_p.get("arrival_time")
             train_no = inv.get("train_no") or inv.get("flight_no") or raw_p.get("train_no") or raw_p.get("flight_no")
@@ -82,13 +96,24 @@ class MasterOrchestrator:
                     import re
                     m = re.search(r"([^\s\-—至]+)[—\-至到]([^\s\-—次]+)", desc)
                     if m:
-                        dep_raw = m.group(1).replace("站", "").replace("南", "").replace("北", "").replace("东", "").replace("西", "").replace("虹桥", "").strip()
-                        arr_raw = m.group(2).replace("站", "").replace("南", "").replace("北", "").replace("东", "").replace("西", "").replace("虹桥", "").strip()
-                        dep_city = dep_city or dep_raw
-                        arr_city = arr_city or arr_raw
+                        dep_raw = m.group(1).strip()
+                        arr_raw = m.group(2).strip()
+                        dep_city = dep_city or cls._resolve_station_city(dep_raw)
+                        arr_city = arr_city or cls._resolve_station_city(arr_raw)
                     m_no = re.search(r"([A-Z]\d{1,4})次?", desc)
                     if m_no:
                         train_no = train_no or m_no.group(1)
+
+            # 严格限制：只有 OCR/raw_payload 明确存在真实出行日期字段时才写入，严禁将开票日期 issue_date 当做 travel_date
+            real_travel_date = (
+                inv.get("travel_date")
+                or raw_p.get("travel_date")
+                or inv.get("departure_date")
+                or raw_p.get("departure_date")
+                or inv.get("journey_date")
+                or raw_p.get("journey_date")
+            )
+            real_travel_date_str = str(real_travel_date).strip() if real_travel_date else None
 
             if dep_city and arr_city:
                 segments.append({
@@ -96,7 +121,7 @@ class MasterOrchestrator:
                     "arrival_city": arr_city,
                     "departure_time": dep_time, # 严格保持原样，缺时间为 None，严禁猜测
                     "arrival_time": arr_time,   # 严格保持原样，缺时间为 None，严禁猜测
-                    "travel_date": inv.get("issue_date"),
+                    "travel_date": real_travel_date_str, # 真实乘车日期；缺失时为 None，禁止使用 issue_date
                     "transport_mode": "TRAIN" if ("铁" in inv_type or "车" in inv_type) else "FLIGHT",
                     "transport_no": train_no,
                     "attachment_id": inv.get("attachment_id", 1),

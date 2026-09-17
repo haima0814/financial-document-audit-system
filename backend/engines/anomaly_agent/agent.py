@@ -91,6 +91,15 @@ class AnomalyAgent:
             )
             findings.extend(travel_findings)
 
+            # 当启用交通行程核验且存在行程段，但缺少完整精确发到时刻时，标记为部分核验降级
+            has_complete_times = all(
+                s.departure_time is not None and s.arrival_time is not None
+                for s in seg_list
+            )
+            if not has_complete_times:
+                is_degraded = True
+                degraded_reason = "PARTIAL: TRAVEL_TIME_MISSING"
+
         # 4. 时空物理碰撞检测 (R09)
         if run_spatio_check and spatio_points and len(spatio_points) >= 2:
             st_findings = SpatioTemporalVerifier.detect_spatio_temporal_collisions(spatio_points)

@@ -687,11 +687,169 @@ async def test_master_orchestrator_travel_ticket_end_to_end(monkeypatch):
     assert "R09_SPATIO_TEMPORAL_COLLISION" not in rule_codes
     assert "R09_TRAVEL_DESTINATION_MISMATCH" not in rule_codes
 
-    # 验证执行结果
+    # 验证执行结果：因缺少精确发到时间，进入真实 DEGRADED 状态
     exec_map = {r.role: r for r in result.agent_execution_results}
     assert exec_map[AgentRoleEnum.SUPPLIER].status == AgentExecutionStatus.SKIPPED
     assert exec_map[AgentRoleEnum.SUPPLIER].reason == "NOT_APPLICABLE: DOCUMENT_TYPE_EXEMPT"
+    assert exec_map[AgentRoleEnum.ANOMALY].status == AgentExecutionStatus.DEGRADED
+    assert exec_map[AgentRoleEnum.ANOMALY].reason == "PARTIAL: TRAVEL_TIME_MISSING"
+    assert result.audit_completeness == "DEGRADED"
+
+
+@pytest.mark.asyncio
+async def test_master_orchestrator_travel_ticket_with_exact_times(monkeypatch):
+    """
+    单张车票有完整真实发到时刻：
+    - 正常 SUCCESS
+    - AuditCompleteness 为 COMPLETE
+    - 不因合法高铁移动产生 R09 误报
+    """
+    from engines.contract.context import DocumentContext
+    from engines.contract.agent_role import AgentRoleEnum
+    from engines.contract.result import AgentExecutionStatus
+    from app.core.llm_client import LLMClient
+
+    async def mock_rationality(*args, **kwargs):
+        return {"is_rational": True, "source": "LLM_INFERENCE", "risk_analysis": "正常差旅"}
+    monkeypatch.setattr(LLMClient, "audit_policy_rationality", mock_rationality)
+
+    ctx = DocumentContext(
+        document_id=506,
+        document_no="TRV-TRAIN-002",
+        document_type="TRAVEL_REIMBURSEMENT",
+        applicant_id=1,
+        tenant_id=1,
+        total_amount=Decimal("600.00"),
+        title="北京往返上海出差",
+        line_items=[{
+            "amount": Decimal("600.00"),
+            "city_name": "上海",
+            "start_date": "2026-09-10",
+            "expense_type": "交通费",
+            "item_desc": "北京至上海高铁票"
+        }],
+        invoices=[{
+            "invoice_code": "01",
+            "invoice_number": "TR002",
+            "invoice_type": "铁路电子客票",
+            "total_amount": 600.00,
+            "departure_city": "北京南站",
+            "arrival_city": "上海虹桥",
+            "train_no": "G13",
+            "departure_time": datetime(2026, 9, 10, 8, 0),
+            "arrival_time": datetime(2026, 9, 10, 12, 30),
+            "raw_payload": {
+                "departure_city": "北京南站",
+                "arrival_city": "上海虹桥",
+                "train_no": "G13",
+                "travel_date": "2026-09-10",
+                "departure_time": datetime(2026, 9, 10, 8, 0),
+                "arrival_time": datetime(2026, 9, 10, 12, 30)
+            }
+        }]
+    )
+
+    result = await MasterOrchestrator.run(
+        task_id="task-train-exact-times",
+        context=ctx
+    )
+
+    assert result.task_id == "task-train-exact-times"
+    rule_codes = {f.rule_code for f in result.verified_findings}
+    assert "R09_SPATIO_TEMPORAL_COLLISION" not in rule_codes
+    assert "R09_TRAVEL_DESTINATION_MISMATCH" not in rule_codes
+
+    exec_map = {r.role: r for r in result.agent_execution_results}
     assert exec_map[AgentRoleEnum.ANOMALY].status == AgentExecutionStatus.SUCCESS
+    assert result.audit_completeness == "COMPLETE"
+
+
+def test_station_city_parsing_five_scenarios():
+    """
+    测试车站解析回归：
+    北京南站 → 北京
+    上海虹桥 → 上海
+    南京南站 → 南京
+    西安北站 → 西安
+    南昌西站 → 南昌
+    非标准车站保留原名，禁止暴力字符串删除
+    """
+    from engines.orchestrator.master_graph import MasterOrchestrator
+    assert MasterOrchestrator._resolve_station_city("北京南站") == "北京"
+    assert MasterOrchestrator._resolve_station_city("上海虹桥") == "上海"
+    assert MasterOrchestrator._resolve_station_city("南京南站") == "南京"
+    assert MasterOrchestrator._resolve_station_city("西安北站") == "西安"
+    assert MasterOrchestrator._resolve_station_city("南昌西站") == "南昌"
+    assert MasterOrchestrator._resolve_station_city("某某未知乡镇站") == "某某未知乡镇站"
+
+
+def test_travel_segment_never_uses_issue_date_as_travel_date():
+    """
+    测试禁止把 invoice.issue_date 当做 travel_date：
+    invoice.issue_date 存在但无真实 travel_date 时，TravelSegment.travel_date 必须严格为 None
+    """
+    from engines.orchestrator.master_graph import MasterOrchestrator
+    invoices = [{
+        "invoice_type": "铁路电子客票",
+        "invoice_number": "TR_TEST_001",
+        "issue_date": "2026-09-01",  # 开票日期
+        "departure_city": "北京南站",
+        "arrival_city": "上海虹桥",
+        "raw_payload": {}          # 缺失真实乘车日期
+    }]
+    segs = MasterOrchestrator._extract_travel_segments(invoices, [])
+    assert len(segs) == 1
+    assert segs[0]["departure_city"] == "北京"
+    assert segs[0]["arrival_city"] == "上海"
+    assert segs[0]["travel_date"] is None
+
+
+@pytest.mark.asyncio
+async def test_audit_context_builder_xian_coordinates(setup_test_db):
+    """
+    测试 AuditContextBuilder 时空点经纬度：
+    西安消费事件必须使用西安真实坐标，严禁使用上海坐标
+    """
+    from app.services.audit_context_builder import AuditContextBuilder
+    from app.models import FinancialDocument, DocumentLineItem
+    from engines.policy_agent.city_geo import get_city_geo
+
+    _, SessionMaker = setup_test_db
+    async with SessionMaker() as session:
+        doc = FinancialDocument(
+            document_no="TRV-XIAN-001",
+            document_type="TRAVEL_REIMBURSEMENT",
+            title="西安差旅",
+            applicant_id=1,
+            total_amount=Decimal("800.00"),
+            status="SUBMITTED"
+        )
+        session.add(doc)
+        await session.flush()
+        item = DocumentLineItem(
+            document_id=doc.id,
+            line_no=1,
+            expense_type="餐饮费",
+            item_desc="西安招待午餐",
+            amount=Decimal("800.00"),
+            city_name="西安",
+            start_date=datetime(2026, 9, 12, 12, 0)
+        )
+        session.add(item)
+        await session.commit()
+        doc_id = doc.id
+
+    async with SessionMaker() as session:
+        ctx = await AuditContextBuilder.build(session, doc_id)
+        assert len(ctx.spatio_points) == 1
+        pt = ctx.spatio_points[0]
+        xian_geo = get_city_geo("西安")
+        assert pt["city_name"] == xian_geo.name
+        assert pt["latitude"] == xian_geo.latitude
+        assert pt["longitude"] == xian_geo.longitude
+        # 验证绝非上海坐标 (31.2304, 121.4737)
+        assert pt["latitude"] != 31.2304
+
 
 
 
