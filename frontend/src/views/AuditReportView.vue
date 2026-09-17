@@ -383,11 +383,11 @@ const toggleRowExpand = (id) => {
   }
 }
 
-// 审核完整度
+// 审核完整度 (缺失不得默认 COMPLETE)
 const auditCompleteness = computed(() => {
-  if (!report.value) return 'COMPLETE'
+  if (!report.value) return 'UNKNOWN'
   const payload = report.value.full_report_payload || {}
-  return payload.audit_completeness || 'COMPLETE'
+  return payload.audit_completeness || 'UNKNOWN'
 })
 
 // 审批决策
@@ -405,7 +405,7 @@ const decisionAction = computed(() => {
   if (auditCompleteness.value !== 'COMPLETE') {
     return 'MANUAL_REVIEW'
   }
-  if (report.value.final_score >= 90) {
+  if (report.value.final_score >= 90 && auditCompleteness.value === 'COMPLETE') {
     return 'AUTO_APPROVE'
   }
   return 'MANUAL_REVIEW'

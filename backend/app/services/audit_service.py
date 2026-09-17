@@ -3,12 +3,14 @@ backend/app/services/audit_service.py
 风控体检报告查询、证据链提取与智能 AI 问答服务
 """
 import uuid
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, desc
 from sqlalchemy.orm import selectinload
+from fastapi import HTTPException, status
 
+from app.models.user import User
 from app.models.audit import AnalysisTask, ReviewReport, RiskFinding, AuditChatSession, AuditChatMessage
 from app.models.document import FinancialDocument
 from app.models.workflow import ApprovalWorkflow
@@ -350,17 +352,111 @@ class AuditService:
         res = await self.db.execute(stmt)
         return list(res.scalars().all())
 
+    async def check_document_access_permission(
+        self,
+        doc: FinancialDocument,
+        user_id: int,
+        roles: List[str]
+    ) -> bool:
+        """
+        验证当前用户是否有权访问该单据的风控审查上下文：
+        1. ADMIN 或 超级用户: 拥有全量数据访问权限；
+        2. 单据经办人本人 (applicant_id == user_id): 拥有访问权限；
+        3. CFO: 金额 >= 10,000 或 非草稿单据 (处于审核/审批/办结状态)；
+        4. FINANCE: 所有非草稿单据 (status != 'DRAFT')；
+        5. MANAGER: 本部门非草稿单据 (department_name == user.department_name)；
+        6. 其他 (普通员工): 严禁跨越访问他人单据。
+        """
+        if "ADMIN" in roles:
+            return True
+        if doc.applicant_id == user_id:
+            return True
+        if "CFO" in roles:
+            if doc.total_amount and doc.total_amount >= 10000:
+                return True
+            if doc.status != "DRAFT":
+                return True
+            report = await self.get_report_by_document(doc.id)
+            if report and report.overall_risk_level == "high":
+                return True
+        if "FINANCE" in roles:
+            if doc.status != "DRAFT":
+                return True
+        if "MANAGER" in roles:
+            user = await self.db.get(User, user_id)
+            if user and user.department_name and doc.department_name == user.department_name:
+                if doc.status != "DRAFT":
+                    return True
+        return False
+
+    async def validate_chat_access(
+        self,
+        user_id: int,
+        roles: List[str],
+        req: AuditChatReq
+    ) -> Tuple[FinancialDocument, Optional[AuditChatSession]]:
+        """
+        统一执行单据数据权限与 session_id 严格校验 (Fail-Closed):
+        - document 必须通过当前用户的数据权限校验，禁止只凭 document_id 读取任意报告上下文；
+        - 已有 session_id 必须验证属于当前 user_id 且绑定当前 document_id；
+        - 若 session_id 不存在或属于他人，立即拒绝。
+        """
+        # 1. 校验单据存在性
+        doc = await self.db.get(FinancialDocument, req.document_id)
+        if not doc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"单据 [ID={req.document_id}] 不存在"
+            )
+
+        # 2. 校验当前用户单据数据权限 (RBAC)
+        has_perm = await self.check_document_access_permission(doc, user_id, roles)
+        if not has_perm:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="数据权限拒绝：您无权访问该单据的风控审查内容"
+            )
+
+        # 3. 校验 session_id 合法性与归属性
+        chat_session = None
+        if req.session_id:
+            stmt = select(AuditChatSession).where(AuditChatSession.session_id == req.session_id)
+            chat_session = (await self.db.execute(stmt)).scalars().first()
+            if not chat_session:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="指定的问答会话不存在或已失效"
+                )
+            if chat_session.user_id != user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="会话权限拒绝：该会话属于其他用户，禁止跨用户访问"
+                )
+            if chat_session.document_id != req.document_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="会话冲突：该会话未绑定当前单据"
+                )
+
+        return doc, chat_session
+
     async def chat_with_audit_context(
         self,
         user_id: int,
-        req: AuditChatReq
+        req: AuditChatReq,
+        roles: Optional[List[str]] = None
     ) -> AuditChatResp:
         """
-        基于当前单据的风控体检报告和证据链，进行智能问答
+        基于当前单据的风控体检报告和证据链，进行智能问答 (带严格权限校验)
         """
+        doc, chat_session = await self.validate_chat_access(
+            user_id=user_id,
+            roles=roles or [],
+            req=req
+        )
+
         # 1. 查找或创建 Session
-        session_id = req.session_id
-        if not session_id:
+        if not chat_session:
             session_id = f"sess_{uuid.uuid4().hex[:12]}"
             chat_session = AuditChatSession(
                 session_id=session_id,
@@ -369,6 +465,8 @@ class AuditService:
             )
             self.db.add(chat_session)
             await self.db.flush()
+        else:
+            session_id = chat_session.session_id
 
         # 2. 记录用户提问消息
         user_msg = AuditChatMessage(
@@ -379,8 +477,7 @@ class AuditService:
         )
         self.db.add(user_msg)
 
-        # 3. 加载单据与风控报告上下文
-        doc = await self.db.get(FinancialDocument, req.document_id)
+        # 3. 加载风控报告上下文
         report = await self.get_report_by_document(req.document_id)
 
         # 4. 基于证据链与大模型 (LLM RAG + 规则模板优雅兜底) 生成回答
@@ -476,7 +573,8 @@ class AuditService:
     async def chat_with_audit_context_stream(
         self,
         user_id: int,
-        req: AuditChatReq
+        req: AuditChatReq,
+        roles: Optional[List[str]] = None
     ):
         """
         流式 AI 审查问答生成器 (SSE 协议规范)
@@ -491,13 +589,17 @@ class AuditService:
         import json
         import uuid
         from app.models.audit import AuditChatSession, AuditChatMessage
-        from app.models.document import FinancialDocument
         from app.core.llm_client import LLMClient
 
-        session_id = req.session_id
+        doc, chat_session = await self.validate_chat_access(
+            user_id=user_id,
+            roles=roles or [],
+            req=req
+        )
+
         try:
             # 1. 查找或创建 Session
-            if not session_id:
+            if not chat_session:
                 session_id = f"sess_{uuid.uuid4().hex[:12]}"
                 chat_session = AuditChatSession(
                     session_id=session_id,
@@ -506,6 +608,8 @@ class AuditService:
                 )
                 self.db.add(chat_session)
                 await self.db.flush()
+            else:
+                session_id = chat_session.session_id
 
             # 发送 meta 事件
             yield f"event: meta\ndata: {json.dumps({'session_id': session_id}, ensure_ascii=False)}\n\n"
@@ -520,8 +624,7 @@ class AuditService:
             self.db.add(user_msg)
             await self.db.flush()
 
-            # 3. 加载单据与风控报告上下文
-            doc = await self.db.get(FinancialDocument, req.document_id)
+            # 3. 加载风控报告上下文
             report = await self.get_report_by_document(req.document_id)
 
             citations = []

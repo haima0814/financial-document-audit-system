@@ -2,10 +2,14 @@
  * frontend/src/utils/auditFormatters.js
  * 智能风控前端统一展示格式化器与枚举业务中文映射层
  * 
- * 严格边界：
+ * 严格安全边界 (Fail-Closed)：
  * 1. 仅在展示层转换，不修改后端 enum、数据库字段及网络传输协议；
  * 2. 统一兼容 Array、Object、enum、string、null、undefined 等各种异构数据；
- * 3. 未知或无法识别的值统一输出为：未知 (RAW_VALUE)，绝不暴露裸技术代码或数组索引数字。
+ * 3. 缺失 source 不得默认 DETERMINISTIC_RULE，显示“未知来源”；
+ * 4. UNKNOWN 绝不显示“系统推导”，统一规范为“未知来源”；
+ * 5. 缺失 risk 不得默认“低风险”，显示“未知风险”；unknown 风险标签不得默认绿色 success，返回 info；
+ * 6. 缺失 completeness 不得默认“完整审核”，显示“未知完整度”；
+ * 7. 未知或无法识别的值统一输出为：未知 (RAW_VALUE)，绝不暴露裸技术代码或数组索引数字。
  */
 
 // 1. 决策来源映射
@@ -16,7 +20,7 @@ export const decisionSourceMap = {
   KNOWLEDGE_BASE: '制度知识库检索',
   RAG: '制度知识库检索',
   SYSTEM: '系统内置',
-  UNKNOWN: '系统推导'
+  UNKNOWN: '未知来源'
 }
 
 // 2. 智能体执行状态映射
@@ -27,7 +31,8 @@ export const executionStatusMap = {
   FAILED: '执行失败',
   SKIPPED: '已跳过',
   TIMEOUT: '执行超时',
-  PLANNED: '规划中'
+  PLANNED: '规划中',
+  UNKNOWN: '未知状态'
 }
 
 // 3. 风险等级映射
@@ -82,11 +87,12 @@ export const agentRoleNameMap = {
 }
 
 /**
- * 格式化决策来源
+ * 格式化决策来源 (缺失或 UNKNOWN 统一为“未知来源”，严禁伪造确定性规则)
  */
 export function formatDecisionSource(source) {
-  if (!source) return '系统内置'
+  if (!source) return '未知来源'
   const key = String(source).trim()
+  if (key.toUpperCase() === 'UNKNOWN') return '未知来源'
   return decisionSourceMap[key] || `未知 (${key})`
 }
 
@@ -94,26 +100,28 @@ export function formatDecisionSource(source) {
  * 格式化执行状态
  */
 export function formatExecutionStatus(status) {
-  if (!status) return '规划中'
+  if (!status) return '未知状态'
   const key = String(status).trim().toUpperCase()
   return executionStatusMap[key] || `未知 (${status})`
 }
 
 /**
- * 格式化风险等级
+ * 格式化风险等级 (缺失或未知返回“未知风险”，严禁默认低风险)
  */
 export function formatRiskLevel(level) {
-  if (!level) return '低风险'
+  if (!level) return '未知风险'
   const key = String(level).trim()
+  if (key.toUpperCase() === 'UNKNOWN') return '未知风险'
   return riskLevelMap[key] || riskLevelMap[key.toLowerCase()] || `未知 (${level})`
 }
 
 /**
- * 格式化审核完整度
+ * 格式化审核完整度 (缺失或未知返回“未知完整度”，严禁默认完整审核)
  */
 export function formatAuditCompleteness(completeness) {
-  if (!completeness) return '完整审核'
+  if (!completeness) return '未知完整度'
   const key = String(completeness).trim().toUpperCase()
+  if (key === 'UNKNOWN') return '未知完整度'
   return auditCompletenessMap[key] || `未知 (${completeness})`
 }
 
@@ -155,13 +163,14 @@ export function normalizeAgentExecutions(fullReportPayload) {
 
   const normalized = []
 
-  // 情况 A: agent_execution_results 是数组形态 (最常见且规范的 DTO 形态)
+  // 情况 A: agent_execution_results 是数组形态
   if (Array.isArray(results)) {
     for (let i = 0; i < results.length; i++) {
       const item = results[i] || {}
       const rawRole = item.role || item.agent_role || item.name || plannedAgents[i] || `agent_${i}`
       const status = item.status || 'SUCCESS'
-      const source = item.source || 'DETERMINISTIC_RULE'
+      // 缺失 source 绝不默认 DETERMINISTIC_RULE
+      const rawSource = item.source != null && item.source !== '' ? item.source : 'UNKNOWN'
       const durationMs = item.duration_ms ?? item.elapsed_ms
 
       normalized.push({
@@ -171,8 +180,8 @@ export function normalizeAgentExecutions(fullReportPayload) {
         status: String(status).toUpperCase(),
         status_cn: formatExecutionStatus(status),
         duration: durationMs != null ? `${durationMs} ms` : '-',
-        source: String(source),
-        source_cn: formatDecisionSource(source),
+        source: String(rawSource),
+        source_cn: formatDecisionSource(rawSource),
         reason: item.reason || item.detail || '核验通过，未触发阻断性异常',
         is_degraded: Boolean(item.is_degraded || status === 'DEGRADED')
       })
@@ -183,7 +192,6 @@ export function normalizeAgentExecutions(fullReportPayload) {
   // 情况 B: agent_execution_results 是字典/对象形态 (key -> item)
   if (results && typeof results === 'object') {
     const keys = Object.keys(results)
-    // 过滤纯数字索引键以防二次污染
     const roleKeys = keys.filter(k => !/^\d+$/.test(k))
     const targetKeys = roleKeys.length > 0 ? roleKeys : plannedAgents
 
@@ -192,7 +200,8 @@ export function normalizeAgentExecutions(fullReportPayload) {
       const item = results[k] || {}
       const rawRole = item.role || item.name || k
       const status = item.status || 'SUCCESS'
-      const source = item.source || 'DETERMINISTIC_RULE'
+      // 缺失 source 绝不默认 DETERMINISTIC_RULE
+      const rawSource = item.source != null && item.source !== '' ? item.source : 'UNKNOWN'
       const durationMs = item.duration_ms ?? item.elapsed_ms
 
       normalized.push({
@@ -202,8 +211,8 @@ export function normalizeAgentExecutions(fullReportPayload) {
         status: String(status).toUpperCase(),
         status_cn: formatExecutionStatus(status),
         duration: durationMs != null ? `${durationMs} ms` : '-',
-        source: String(source),
-        source_cn: formatDecisionSource(source),
+        source: String(rawSource),
+        source_cn: formatDecisionSource(rawSource),
         reason: item.reason || item.detail || '核验通过，未触发阻断性异常',
         is_degraded: Boolean(item.is_degraded || status === 'DEGRADED')
       })
@@ -220,8 +229,8 @@ export function normalizeAgentExecutions(fullReportPayload) {
       status: 'PLANNED',
       status_cn: '规划中',
       duration: '-',
-      source: 'SYSTEM',
-      source_cn: '系统内置',
+      source: 'UNKNOWN',
+      source_cn: '未知来源',
       reason: '已列入规划流水线，等待调度执行',
       is_degraded: false
     }))
@@ -231,24 +240,29 @@ export function normalizeAgentExecutions(fullReportPayload) {
 }
 
 /**
- * 标签颜色映射助手
+ * 标签颜色映射助手 (Fail-Closed: unknown 风险不得默认绿色 success)
  */
 export function getRiskLevelTagType(level) {
-  const lvl = String(level).toLowerCase()
+  if (!level) return 'info'
+  const lvl = String(level).toLowerCase().trim()
   if (lvl === 'high') return 'danger'
   if (lvl === 'medium') return 'warning'
-  return 'success'
+  if (lvl === 'low') return 'success'
+  return 'info'
 }
 
 export function getCompletenessTagType(completeness) {
-  const c = String(completeness).toUpperCase()
+  if (!completeness) return 'info'
+  const c = String(completeness).toUpperCase().trim()
   if (c === 'COMPLETE') return 'success'
   if (c === 'DEGRADED') return 'warning'
-  return 'danger'
+  if (c === 'INCOMPLETE') return 'danger'
+  return 'info'
 }
 
 export function getDecisionTagType(action) {
-  const a = String(action).toUpperCase()
+  if (!action) return 'info'
+  const a = String(action).toUpperCase().trim()
   if (a === 'AUTO_APPROVE') return 'success'
   if (a === 'MANUAL_REVIEW' || a === 'NEED_SUPPLEMENT') return 'warning'
   if (a === 'REJECT') return 'danger'
@@ -256,7 +270,8 @@ export function getDecisionTagType(action) {
 }
 
 export function getAgentStatusTagType(status) {
-  const s = String(status).toUpperCase()
+  if (!status) return 'info'
+  const s = String(status).toUpperCase().trim()
   if (s === 'SUCCESS') return 'success'
   if (s === 'DEGRADED') return 'warning'
   if (s === 'FAILED' || s === 'TIMEOUT') return 'danger'

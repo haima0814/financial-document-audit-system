@@ -86,7 +86,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, nextTick, onMounted, watch } from 'vue'
+import { ref, reactive, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { ChatDotRound, Aim, Loading, Service, User } from '@element-plus/icons-vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
@@ -113,6 +113,7 @@ const loading = ref(false)
 const sessionId = ref('')
 const msgListRef = ref(null)
 const userScrolledUp = ref(false)
+let currentAbortController = null
 
 const quickQuestions = [
   '为什么判定差旅住宿费超标？',
@@ -121,15 +122,24 @@ const quickQuestions = [
   '如何进行合规特批放行？'
 ]
 
-// 安全 Markdown 渲染 (防 XSS)
+// 安全 HTML 转义与 DOMPurify 净化 (彻底杜绝 XSS fail-open)
+const escapeHtml = (str) => {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
+}
+
 const renderMarkdown = (text) => {
   if (!text) return ''
   try {
     const rawHtml = marked.parse(text, { breaks: true, gfm: true })
     return DOMPurify.sanitize(rawHtml)
   } catch (err) {
-    console.warn('Markdown 渲染失败:', err)
-    return text
+    console.warn('Markdown 渲染失败 (已启动安全转义与净化防线):', err)
+    return DOMPurify.sanitize(escapeHtml(text))
   }
 }
 
@@ -163,6 +173,12 @@ const sendQuick = (q) => {
 const handleSend = async () => {
   const query = inputQuery.value.trim()
   if (!query || loading.value) return
+
+  // 中止上一个仍在执行中的流式请求
+  if (currentAbortController) {
+    currentAbortController.abort()
+  }
+  currentAbortController = new AbortController()
 
   // 1. 立即记录用户消息
   messages.value.push({
@@ -199,7 +215,8 @@ const handleSend = async () => {
         document_id: Number(props.documentId),
         message: query,
         session_id: sessionId.value || null
-      })
+      }),
+      signal: currentAbortController.signal
     })
 
     if (!response.ok) {
@@ -268,6 +285,10 @@ const handleSend = async () => {
       }
     }
   } catch (err) {
+    if (err.name === 'AbortError') {
+      console.log('流式问答已主动中止')
+      return
+    }
     console.error('流式问答通信异常:', err)
     if (!assistantMsg.content) {
       assistantMsg.content = '抱歉，网络连接异常或审查对话服务不可用，请稍后重试。'
@@ -277,6 +298,7 @@ const handleSend = async () => {
   } finally {
     assistantMsg.isGenerating = false
     loading.value = false
+    currentAbortController = null
     if (!userScrolledUp.value) {
       scrollToBottom()
     }
@@ -299,6 +321,13 @@ watch(
 onMounted(() => {
   if (props.initialQuestion) {
     sendQuick(props.initialQuestion)
+  }
+})
+
+onUnmounted(() => {
+  if (currentAbortController) {
+    currentAbortController.abort()
+    currentAbortController = null
   }
 })
 </script>

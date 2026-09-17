@@ -70,7 +70,11 @@ async def chat_with_audit(
     db: AsyncSession = Depends(get_db)
 ):
     service = AuditService(db)
-    res = await service.chat_with_audit_context(user_id=current_user.user_id, req=req)
+    res = await service.chat_with_audit_context(
+        user_id=current_user.user_id,
+        roles=current_user.roles or [],
+        req=req
+    )
     return res
 
 @router.post("/chat/stream", summary="基于审查报告与证据链进行流式智能问答 (SSE)")
@@ -80,7 +84,22 @@ async def chat_with_audit_stream(
     db: AsyncSession = Depends(get_db)
 ):
     service = AuditService(db)
+    # 同步前置权限与会话校验：未授权单据或非法 session_id 立即直接拒绝 (403/404)
+    await service.validate_chat_access(
+        user_id=current_user.user_id,
+        roles=current_user.roles or [],
+        req=req
+    )
     return StreamingResponse(
-        service.chat_with_audit_context_stream(user_id=current_user.user_id, req=req),
-        media_type="text/event-stream"
+        service.chat_with_audit_context_stream(
+            user_id=current_user.user_id,
+            roles=current_user.roles or [],
+            req=req
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
     )
