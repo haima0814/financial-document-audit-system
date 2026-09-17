@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, desc
 from sqlalchemy.orm import selectinload
 
-from app.models.audit import ReviewReport, RiskFinding, AuditChatSession, AuditChatMessage
+from app.models.audit import AnalysisTask, ReviewReport, RiskFinding, AuditChatSession, AuditChatMessage
 from app.models.document import FinancialDocument
 from app.models.workflow import ApprovalWorkflow
 from app.schemas.audit import ReviewReportOut, RiskFindingOut, AuditChatReq, AuditChatResp, AuditChatMessageOut
@@ -22,6 +22,9 @@ from engines.orchestrator.stream_producer import StreamProducer
 class AuditService:
     def __init__(self, db: AsyncSession):
         self.db = db
+        # 确保生命周期中领域事件消费者已稳定挂载 (杜绝手工单独 import 依赖)
+        from app.services.audit_handler import register_audit_handler
+        register_audit_handler()
 
     async def start_audit(
         self,
@@ -107,7 +110,39 @@ class AuditService:
                 )
             except Exception as e:
                 import logging
-                logging.getLogger("audit_service").error(f"审核流水线异步执行失败: {e}", exc_info=True)
+                logger = logging.getLogger("audit_service")
+                logger.error(f"审核流水线异步执行失败: {e}", exc_info=True)
+
+                # 状态与错误落库 (独立 session 隔离保护，防止事务污染)
+                try:
+                    from app.core.database import AsyncSessionLocal
+                    async with AsyncSessionLocal() as err_session:
+                        task_stmt = select(AnalysisTask).where(AnalysisTask.task_id == task_id)
+                        task_rec = (await err_session.execute(task_stmt)).scalars().first()
+                        if task_rec and task_rec.status != "COMPLETED":
+                            task_rec.status = "FAILED"
+                            task_rec.current_stage = "FAILED"
+                            task_rec.error_message = str(e)
+                            await err_session.commit()
+                except Exception as db_err:
+                    logger.error(f"写入任务失败状态异常: {db_err}")
+
+                # 广播 TASK_FAILED 实时事件
+                try:
+                    await StreamProducer.publish_event(
+                        task_id=task_id,
+                        document_id=document_id,
+                        event_type=EventTypeEnum.TASK_FAILED,
+                        payload={
+                            "error_code": "PIPELINE_FAILED",
+                            "error_detail": f"审核流水线执行失败: {str(e)}"
+                        }
+                    )
+                except Exception as sse_err:
+                    logger.error(f"广播 TASK_FAILED 异常: {sse_err}")
+
+                # 重新抛出异常，驱动 LocalTaskManagerDispatcher 正确标记 FAILED
+                raise e
 
         await LocalTaskManagerDispatcher.dispatch_audit_task(
             task_id=task_id,
@@ -137,6 +172,14 @@ class AuditService:
         import logging
         logger = logging.getLogger("audit_service")
 
+        # 0. 校验关联单据是否存在 (防止单体测试或无效事件引发外键异常)
+        target_doc_id = document_id or getattr(result, "document_id", None)
+        if target_doc_id:
+            doc = await self.db.get(FinancialDocument, target_doc_id)
+            if not doc:
+                logger.warning(f"[AuditService] 单据[{target_doc_id}]在数据库中不存在，跳过归档处理。")
+                return None
+
         # 1. 事务型幂等登记 (Unit of Work 事务防线)
         if event_id:
             from app.models.audit import ProcessedEvent
@@ -154,61 +197,124 @@ class AuditService:
                 logger.warning(f"[AuditService] 数据库唯一约束触发幂等拦截！事件[{event_id}]已处理，跳过重复落库。")
                 return None
 
-        # 2. 统一由 audit_repo 原子落库
-        report = await audit_repo.save_audit_result(self.db, result)
-
-        # 2. 移交审批状态机（状态转移由 ApprovalEngine 拥有全权：小额低危免审直通 / 待人工审批流转）
-
-        # 3. 触发审批引擎智能流转
+        # 2. 统一由 audit_repo 原子落库 (情况 A: 报告落库失败保护)
         try:
-            doc = await self.db.get(FinancialDocument, document_id)
-            doc_type = doc.document_type if doc else "TRAVEL_REIMBURSEMENT"
-            wf_stmt = select(ApprovalWorkflow).where(
-                and_(ApprovalWorkflow.document_type == doc_type, ApprovalWorkflow.is_active == True)
-            )
-            wf = (await self.db.execute(wf_stmt)).scalars().first()
-            if not wf:
-                wf = (await self.db.execute(select(ApprovalWorkflow).where(ApprovalWorkflow.is_active == True))).scalars().first()
-            wf_id = wf.id if wf else 1
-
-            await ApprovalEngine.start_workflow(
-                db=self.db,
-                document_id=document_id,
-                workflow_id=wf_id,
-                report_id=report.id
-            )
+            report = await audit_repo.save_audit_result(self.db, result)
         except Exception as e:
-            import logging
-            logging.getLogger("audit_service").warning(f"触发审批流失败或已被处理: {e}")
+            logger.exception(f"[AuditService] 审核报告原子落库失败: {e}")
+            await self.db.rollback()
 
-        # 4. 提交数据库事务
+            # 打开独立会话将 AnalysisTask 置为 FAILED 并持久化真实错误摘要
+            try:
+                from app.core.database import AsyncSessionLocal
+                async with AsyncSessionLocal() as err_session:
+                    task_stmt = select(AnalysisTask).where(AnalysisTask.task_id == task_id)
+                    task_rec = (await err_session.execute(task_stmt)).scalars().first()
+                    if task_rec:
+                        task_rec.status = "FAILED"
+                        task_rec.current_stage = "FAILED"
+                        task_rec.error_message = f"审核报告落库失败: {str(e)}"
+                        await err_session.commit()
+            except Exception as db_err:
+                logger.error(f"[AuditService] 记录任务失败状态异常: {db_err}")
+
+            # 发送 TASK_FAILED 实时事件，通知前端停止转圈等待
+            try:
+                await StreamProducer.publish_event(
+                    task_id=task_id,
+                    document_id=document_id,
+                    event_type=EventTypeEnum.TASK_FAILED,
+                    payload={
+                        "error_code": "SAVE_REPORT_FAILED",
+                        "error_detail": f"审核体检报告持久化失败: {str(e)}"
+                    }
+                )
+            except Exception as sse_err:
+                logger.error(f"[AuditService] 广播 TASK_FAILED 异常: {sse_err}")
+
+            raise e
+
+        # 3. 触发审批引擎智能流转 (情况 B: Savepoint / begin_nested 隔离保护)
+        workflow_initialized = True
+        workflow_error = None
+        try:
+            async with self.db.begin_nested():
+                doc = await self.db.get(FinancialDocument, document_id)
+                doc_type = doc.document_type if doc else "TRAVEL_REIMBURSEMENT"
+                wf_stmt = select(ApprovalWorkflow).where(
+                    and_(ApprovalWorkflow.document_type == doc_type, ApprovalWorkflow.is_active == True)
+                )
+                wf = (await self.db.execute(wf_stmt)).scalars().first()
+                if not wf:
+                    wf = (await self.db.execute(select(ApprovalWorkflow).where(ApprovalWorkflow.is_active == True))).scalars().first()
+                wf_id = wf.id if wf else 1
+
+                await ApprovalEngine.start_workflow(
+                    db=self.db,
+                    document_id=document_id,
+                    workflow_id=wf_id,
+                    report_id=report.id
+                )
+        except Exception as exc:
+            workflow_initialized = False
+            workflow_error = str(exc)
+            logger.exception(f"[AuditService] 触发审批流失败，已通过 Savepoint 隔离回滚，审核事实报告保留: {exc}")
+
+        # 4. 挂载 workflow 状态信息至报告 payload
+        # Savepoint 回滚会导致 session 实体属性 expired，使用 await refresh 异步刷新实体避免 MissingGreenlet
+        if report:
+            await self.db.refresh(report)
+            report_payload = dict(report.full_report_payload) if (report.full_report_payload and isinstance(report.full_report_payload, dict)) else {}
+            report_payload["workflow_initialized"] = workflow_initialized
+            report_payload["workflow_error"] = workflow_error
+            report.full_report_payload = report_payload
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(report, "full_report_payload")
+
+        # 5. 提交数据库事务 (确保 ReviewReport, RiskFinding, AnalysisTask COMPLETED 成功落库)
         await self.db.commit()
         await self.db.refresh(report)
 
-        # 5. 发布 TASK_COMPLETED 领域事件 (解耦通知 WebSocket / SSE / MQ)
+        # 6. 发布 TASK_COMPLETED 领域事件 (解耦通知 WebSocket / SSE / MQ)
+        decision_info = report.full_report_payload.get("approval_decision") if report.full_report_payload else None
+        completed_payload = {
+            "report_id": report.id,
+            "task_id": task_id,
+            "percent": 100,
+            "overall_risk_level": result.overall_risk_level,
+            "risk_score": result.risk_score,
+            "final_score": result.final_score,
+            "high_risks_count": result.high_risks_count,
+            "medium_risks_count": result.medium_risks_count,
+            "low_risks_count": result.low_risks_count,
+            "summary": result.summary or "",
+            "audit_completeness": getattr(result, "audit_completeness", "COMPLETE"),
+            "decision": decision_info,
+            "workflow_initialized": workflow_initialized,
+            "workflow_error": workflow_error,
+        }
         await StreamProducer.publish_event(
             task_id=task_id,
             document_id=document_id,
             event_type=EventTypeEnum.TASK_COMPLETED,
-            payload={
-                "report_id": report.id,
-                "task_id": task_id,
-                "percent": 100,
-                "overall_risk_level": result.overall_risk_level,
-                "risk_score": result.risk_score,
-                "final_score": result.final_score,
-                "high_risks_count": result.high_risks_count,
-                "medium_risks_count": result.medium_risks_count,
-                "low_risks_count": result.low_risks_count,
-                "summary": result.summary or "",
-                "audit_completeness": result.audit_completeness,
-            }
+            payload=completed_payload
         )
 
         return report
 
     # 兼容别名
     handle_audit_completion = handle_audit_completed
+
+    async def get_latest_task_by_document(self, document_id: int) -> Optional[AnalysisTask]:
+        """按单据 ID 及当前最新版本获取审核任务 (禁止跨版本串连)"""
+        doc = await self.db.get(FinancialDocument, document_id)
+        if not doc:
+            return None
+        return await audit_repo.get_latest_task_by_document(
+            self.db,
+            document_id=document_id,
+            audit_version=doc.current_version
+        )
 
     async def get_report_by_document(self, document_id: int) -> Optional[ReviewReport]:
         """查询指定单据的最新风控综合体检报告 (附带 findings)"""

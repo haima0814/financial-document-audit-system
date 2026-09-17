@@ -48,6 +48,7 @@ class AnalysisTaskOut(BaseModel):
     id: int
     task_id: str
     document_id: int
+    audit_version: int = 1
     status: str
     current_stage: str
     progress_pct: int

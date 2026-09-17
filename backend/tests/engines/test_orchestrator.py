@@ -23,6 +23,8 @@ async def setup_test_db(monkeypatch):
 
     SessionMaker = async_sessionmaker(bind=test_engine, expire_on_commit=False)
     monkeypatch.setattr(mg, "AsyncSessionLocal", SessionMaker)
+    import app.services.audit_handler as ah
+    monkeypatch.setattr(ah, "AsyncSessionLocal", SessionMaker)
 
     # 预先插入测试单据
     async with SessionMaker() as session:

@@ -23,10 +23,16 @@ logger = logging.getLogger("main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理：启动时初始化数据库表，关闭时清理资源"""
+    """应用生命周期管理：启动时初始化数据库表，注册领域事件消费者，关闭时清理资源"""
     logger.info("Initializing database tables...")
     await init_db()
     logger.info("Database initialized successfully.")
+    
+    # 显式注册与校验领域事件处理器 (AuditCompletionHandler)
+    from app.services.audit_handler import register_audit_handler
+    register_audit_handler()
+    logger.info("Domain event handlers registered successfully.")
+
     yield
     logger.info("Application shutting down...")
 

@@ -57,26 +57,34 @@ class AuditCompletionHandler:
             return
 
         logger.info(f"[AuditCompletionHandler] 接收到任务[{task_id}]审查完毕领域事件(event_id={event_id})，启动事务落库与状态机流转...")
-        async with AsyncSessionLocal() as session:
-            service = AuditService(session)
-            report = await service.handle_audit_completed(
-                task_id=task_id,
-                document_id=event.document_id,
-                result=event.result,
-                event_id=str(event_id) if event_id else None,
-                audit_version=audit_version
-            )
+        try:
+            async with AsyncSessionLocal() as session:
+                service = AuditService(session)
+                report = await service.handle_audit_completed(
+                    task_id=task_id,
+                    document_id=event.document_id,
+                    result=event.result,
+                    event_id=str(event_id) if event_id else None,
+                    audit_version=audit_version
+                )
+        except Exception as exc:
+            logger.exception(f"[AuditCompletionHandler] 处理任务[{task_id}]审核完成领域事件发生致命异常: {exc}")
+            raise exc
 
-        # 2. 标记幂等消费
+        # 2. 标记幂等消费 (仅在事务落库成功完成后登记)
         cls.mark_processed(str(event_id), task_id, audit_version)
         if report:
             logger.info(f"[AuditCompletionHandler] 任务[{task_id}]落库与状态机流转完成 (已登记幂等)！")
         else:
             logger.info(f"[AuditCompletionHandler] 任务[{task_id}]重复事件已幂等吸收！")
 
+def register_audit_handler() -> None:
+    """显式确保 AuditCompletionHandler 完成且仅完成一次注册"""
+    from engines.contract.event_bus import domain_event_bus
+    event_bus.register_domain_handler(AuditCompletedEvent, AuditCompletionHandler.handle)
+    if hasattr(domain_event_bus, "register_domain_handler"):
+        domain_event_bus.register_domain_handler(AuditCompletedEvent, AuditCompletionHandler.handle)
+
 # 启动时向全局 EventBus 与 DomainEventBus 注册领域事件监听
-from engines.contract.event_bus import domain_event_bus
-event_bus.register_domain_handler(AuditCompletedEvent, AuditCompletionHandler.handle)
-if hasattr(domain_event_bus, "register_domain_handler"):
-    domain_event_bus.register_domain_handler(AuditCompletedEvent, AuditCompletionHandler.handle)
+register_audit_handler()
 

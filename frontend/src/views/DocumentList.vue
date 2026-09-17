@@ -108,28 +108,56 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="250" fixed="right" align="center">
+        <el-table-column label="操作" width="260" fixed="right" align="center">
           <template #default="{ row }">
             <el-button size="small" link type="primary" @click="viewDetail(row.id)">详情</el-button>
+
+            <!-- 1. 草稿状态：提交审查 -->
             <el-button
-              v-if="row.status !== 'DRAFT'"
-              size="small"
-              :type="row.status === 'REJECTED' ? 'danger' : 'success'"
-              plain
-              @click="viewAuditReport(row.id)"
-            >
-              {{ row.status === 'REJECTED' ? '体检报告(已驳回)' : '体检报告' }}
-            </el-button>
-            <el-button
-              v-if="row.status === 'DRAFT' || row.status === 'REJECTED'"
+              v-if="row.status === 'DRAFT'"
               size="small"
               type="primary"
               :loading="submittingId === row.id"
               :disabled="submittingId !== null"
               @click="handleSubmit(row)"
             >
-              {{ row.status === 'REJECTED' ? '重新提交' : '提交审查' }}
+              提交审查
             </el-button>
+
+            <!-- 2. 已提交审查 / 审核中状态：查看审查进度 (打开 SSE 抽屉，禁止调用 submit) -->
+            <el-button
+              v-else-if="row.status === 'SUBMITTED' || row.status === 'IN_REVIEW'"
+              size="small"
+              type="primary"
+              plain
+              :loading="progressLoadingId === row.id"
+              @click="viewAuditProgress(row)"
+            >
+              查看审查进度
+            </el-button>
+
+            <!-- 3. 已完成阶段状态：查看体检报告 -->
+            <template v-else-if="['PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'NEED_SUPPLEMENT'].includes(row.status)">
+              <el-button
+                size="small"
+                :type="row.status === 'REJECTED' ? 'danger' : 'success'"
+                plain
+                @click="viewAuditReport(row.id)"
+              >
+                {{ row.status === 'REJECTED' ? '体检报告(已驳回)' : (row.status === 'NEED_SUPPLEMENT' ? '体检报告(待补充)' : '查看体检报告') }}
+              </el-button>
+              <el-button
+                v-if="row.status === 'REJECTED' || row.status === 'NEED_SUPPLEMENT'"
+                size="small"
+                type="warning"
+                plain
+                :loading="submittingId === row.id"
+                :disabled="submittingId !== null"
+                @click="handleSubmit(row)"
+              >
+                重新提交
+              </el-button>
+            </template>
           </template>
         </el-table-column>
       </el-table>
@@ -179,6 +207,7 @@ const drawerVisible = ref(false)
 const activeTaskId = ref('')
 const activeDocId = ref(null)
 const submittingId = ref(null)
+const progressLoadingId = ref(null)
 
 const fetchDocuments = async () => {
   loading.value = true
@@ -215,6 +244,25 @@ const handleSubmit = async (row) => {
     ElMessage.error(err.response?.data?.detail || err.message || '提交审查失败')
   } finally {
     submittingId.value = null
+  }
+}
+
+const viewAuditProgress = async (row) => {
+  if (progressLoadingId.value !== null) return
+  progressLoadingId.value = row.id
+  try {
+    const res = await api.get(`/audits/tasks/by-document/${row.id}/latest`)
+    if (res && res.task_id) {
+      activeTaskId.value = res.task_id
+      activeDocId.value = row.id
+      drawerVisible.value = true
+    } else {
+      ElMessage.warning('未查询到当前版本的有效审查任务')
+    }
+  } catch (err) {
+    ElMessage.error(err.response?.data?.detail || err.message || '获取审核任务进度失败')
+  } finally {
+    progressLoadingId.value = null
   }
 }
 

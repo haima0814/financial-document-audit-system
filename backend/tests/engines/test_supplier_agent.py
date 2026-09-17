@@ -65,7 +65,7 @@ async def test_supplier_profile_dishonest_triggers_r13():
 
     # 2. 完整编排流水线端到端穿透
     ctx = DocumentContext(
-        document_id=301,
+        document_id=311,
         document_no="CORP-2026-002",
         document_type="CORP_PAYMENT",
         total_amount=Decimal("10000.00"),

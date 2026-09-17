@@ -191,27 +191,42 @@ const initPipeline = async (tid) => {
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    let currentEvent = 'message'
+    let currentDataLines = []
+
+    const dispatchCurrentEvent = () => {
+      if (currentDataLines.length > 0) {
+        const dataStr = currentDataLines.join('\n')
+        handleEventMessage(currentEvent, dataStr)
+      }
+      currentEvent = 'message'
+      currentDataLines = []
+    }
 
     while (true) {
       const { value, done } = await reader.read()
-      if (done) break
+      if (done) {
+        dispatchCurrentEvent()
+        break
+      }
 
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
       buffer = lines.pop() || ''
 
-      let currentEvent = 'message'
       for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed || trimmed.startsWith(':')) {
+        const trimmed = line.replace(/\r$/, '')
+        if (trimmed === '') {
+          // SSE frame 结束空行，完整事件触发分发与重置
+          dispatchCurrentEvent()
+        } else if (trimmed.startsWith(':')) {
           // 保活心跳 ping
           continue
-        }
-        if (trimmed.startsWith('event:')) {
+        } else if (trimmed.startsWith('event:')) {
           currentEvent = trimmed.substring(6).trim()
         } else if (trimmed.startsWith('data:')) {
           const dataStr = trimmed.substring(5).trim()
-          handleEventMessage(currentEvent, dataStr)
+          currentDataLines.push(dataStr)
         }
       }
     }
@@ -295,8 +310,8 @@ const handleEventMessage = (eventName, dataStr) => {
         stageContent = `终审质检与反思确认完成，最终有效风险项 ${payload.verified_count ?? count} 条`
         stageTag = 'STAGE_3'
       } else if (stage === 'STAGE_4_EVALUATED') {
-        stageTitle = 'Stage 4: 风险评级与决策就绪'
-        stageContent = `完成综合评级与审批决策判定`
+        stageTitle = 'Stage 4: 风险评级完成，正在归档审核结果'
+        stageContent = `完成综合风险评级，正在执行审核报告入库与审批流编排`
         stageTag = 'STAGE_4'
       }
 
@@ -326,22 +341,31 @@ const handleEventMessage = (eventName, dataStr) => {
       isCompleted.value = true
       summary.value = payload
 
+      const wfInitialized = payload.workflow_initialized !== false
+      const wfError = payload.workflow_error
+
       eventTimeline.value.push({
         timestamp: timeStr,
         tag: 'STAGE_4',
-        title: 'Stage 4: 风控体检报告生成归档',
-        content: `审核完毕！综合评分: ${payload.risk_score ?? payload.final_score ?? 100} 分，风险等级: ${(payload.overall_risk_level || 'LOW').toUpperCase()}`,
-        type: 'success'
+        title: 'Stage 4: 审核报告生成归档完成',
+        content: wfInitialized
+          ? `审核完毕！综合评分: ${payload.risk_score ?? payload.final_score ?? 100} 分，风险等级: ${(payload.overall_risk_level || 'LOW').toUpperCase()}`
+          : `审核报告已生成，但审批流初始化失败，请管理员处理: ${wfError || '审批状态机异常'}`,
+        type: wfInitialized ? 'success' : 'warning'
       })
 
       emit('completed', payload)
     } else if (ev === 'task_failed') {
       isFailed.value = true
+      progress.value = 100
+      const errorMsg = payload.error_detail || payload.error_message || '任务异常中止'
+      const errorCode = payload.error_code ? `[${payload.error_code}] ` : ''
+
       eventTimeline.value.push({
         timestamp: timeStr,
         tag: 'ERROR',
         title: '审核流水线执行失败',
-        content: payload.error_message || '任务异常中止',
+        content: `${errorCode}${errorMsg}`,
         type: 'danger'
       })
     }

@@ -326,6 +326,8 @@ async def test_master_orchestrator_reflection_e2e(monkeypatch):
 
     SessionMaker = async_sessionmaker(bind=test_engine, expire_on_commit=False)
     monkeypatch.setattr(mg, "AsyncSessionLocal", SessionMaker)
+    import app.services.audit_handler as ah
+    monkeypatch.setattr(ah, "AsyncSessionLocal", SessionMaker)
 
     # 构造一张：申报 1200元，发票 1000元，包含 200元出差补贴的单据
     async with SessionMaker() as session:

@@ -85,10 +85,12 @@ class MasterOrchestrator:
         # 广播可靠领域事件 AuditCompletedEvent (驱动跨进程 Celery 或本地 AuditCompletionHandler 消费落库)
         from engines.contract.events import AuditCompletedEvent
         from engines.contract.event_bus import event_bus
+        aud_ver = context.audit_version if (context and hasattr(context, "audit_version") and context.audit_version) else 1
         await event_bus.publish_domain_event(
             AuditCompletedEvent(
                 task_id=state.task_id,
                 document_id=state.document_id,
+                audit_version=aud_ver,
                 result=result_dto
             )
         )

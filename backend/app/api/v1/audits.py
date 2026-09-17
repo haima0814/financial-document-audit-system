@@ -50,6 +50,18 @@ async def get_analysis_task(
         raise HTTPException(status_code=404, detail="未找到指定审查任务")
     return task
 
+@router.get("/tasks/by-document/{document_id}/latest", response_model=AnalysisTaskOut, summary="按单据ID及当前版本获取最新审核任务")
+async def get_latest_task_by_document(
+    document_id: int,
+    current_user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    service = AuditService(db)
+    task = await service.get_latest_task_by_document(document_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"未找到单据 [ID={document_id}] 当前版本的有效审查任务")
+    return task
+
 @router.post("/chat", response_model=AuditChatResp, summary="基于审查报告与证据链进行智能人机问答")
 async def chat_with_audit(
     req: AuditChatReq,

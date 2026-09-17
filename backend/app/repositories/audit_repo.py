@@ -30,6 +30,24 @@ class AuditRepository(BaseRepository[ReviewReport]):
         res = await db.execute(stmt)
         return res.scalars().first()
 
+    async def get_latest_task_by_document(
+        self,
+        db: AsyncSession,
+        document_id: int,
+        audit_version: int
+    ) -> Optional[AnalysisTask]:
+        """严格按 document_id 与当前 audit_version 获取审查任务"""
+        stmt = (
+            select(AnalysisTask)
+            .where(
+                AnalysisTask.document_id == document_id,
+                AnalysisTask.audit_version == audit_version
+            )
+            .order_by(AnalysisTask.id.desc())
+        )
+        res = await db.execute(stmt)
+        return res.scalars().first()
+
     async def save_audit_result(
         self,
         db: AsyncSession,
@@ -41,20 +59,34 @@ class AuditRepository(BaseRepository[ReviewReport]):
         2. 批量写入 risk_findings 表；
         3. 更新/新增 analysis_tasks 记录状态为 COMPLETED；
         """
-        # 1. 写入 review_reports 表
-        report = ReviewReport(
-            task_id=result.task_id,
-            document_id=result.document_id,
-            overall_risk_level=result.overall_risk_level,
-            final_score=result.final_score,
-            high_risks_count=result.high_risks_count,
-            medium_risks_count=result.medium_risks_count,
-            low_risks_count=result.low_risks_count,
-            summary=result.summary,
-            full_report_payload=result.full_report_payload
-        )
-        db.add(report)
-        await db.flush()
+        # 1. 写入或更新 review_reports 表 (幂等防线)
+        report_stmt = select(ReviewReport).where(ReviewReport.task_id == result.task_id)
+        report = (await db.execute(report_stmt)).scalars().first()
+        if not report:
+            report = ReviewReport(
+                task_id=result.task_id,
+                document_id=result.document_id,
+                overall_risk_level=result.overall_risk_level,
+                final_score=result.final_score,
+                high_risks_count=result.high_risks_count,
+                medium_risks_count=result.medium_risks_count,
+                low_risks_count=result.low_risks_count,
+                summary=result.summary,
+                full_report_payload=result.full_report_payload
+            )
+            db.add(report)
+            await db.flush()
+        else:
+            report.overall_risk_level = result.overall_risk_level
+            report.final_score = result.final_score
+            report.high_risks_count = result.high_risks_count
+            report.medium_risks_count = result.medium_risks_count
+            report.low_risks_count = result.low_risks_count
+            report.summary = result.summary
+            report.full_report_payload = result.full_report_payload
+            await db.flush()
+            from sqlalchemy import delete
+            await db.execute(delete(RiskFinding).where(RiskFinding.report_id == report.id))
 
         # 2. 写入 risk_findings 详情表
         for f in result.verified_findings:

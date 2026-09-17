@@ -75,7 +75,9 @@ class InMemoryEventBus:
         handler: Callable[[T_DomainEvent], Awaitable[None]]
     ) -> None:
         """注册强一致领域事件消费者 (如 AuditCompletionHandler)"""
-        self._domain_handlers.setdefault(event_cls, []).append(handler)
+        handlers = self._domain_handlers.setdefault(event_cls, [])
+        if handler not in handlers:
+            handlers.append(handler)
 
     async def publish(self, event: Any) -> None:
         """多态发布入口：自动识别领域事件 (DomainEvent) 与过程事件 (BaseEventEnvelope)"""
@@ -92,7 +94,7 @@ class InMemoryEventBus:
                     logger.warning(f"消费者队列已满，丢弃事件: task={task_id}")
 
     async def publish_domain_event(self, event: DomainEvent) -> None:
-        """发布领域事件至所有已注册的消费处理器"""
+        """发布领域事件至所有已注册的消费处理器 (发生异常向上抛出，严禁静默吞掉)"""
         event_cls = type(event)
         handlers = self._domain_handlers.get(event_cls, [])
         for handler in handlers:
@@ -100,6 +102,7 @@ class InMemoryEventBus:
                 await handler(event)
             except Exception as e:
                 logger.exception(f"[DomainEventBus] 消费者 [{getattr(handler, '__name__', str(handler))}] 执行失败: {e}")
+                raise e
 
     def subscribe(self, task_id: str) -> asyncio.Queue:
         q = asyncio.Queue(maxsize=100)

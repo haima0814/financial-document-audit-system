@@ -123,6 +123,8 @@ class TaskCompletedPayload(BaseModel):
     summary: str = Field(default="", description="执行摘要草拟文本")
     audit_completeness: str = Field(default="COMPLETE", description="审核完整度状态")
     decision: Optional[Dict[str, Any]] = Field(default=None, description="审批流转决策摘要")
+    workflow_initialized: Optional[bool] = Field(default=True, description="审批流是否成功初始化")
+    workflow_error: Optional[str] = Field(default=None, description="审批流初始化异常摘要")
 
     def model_post_init(self, __context: Any) -> None:
         if self.high_count is None:
